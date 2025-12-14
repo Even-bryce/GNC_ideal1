@@ -784,7 +784,7 @@ def generate_valid_tasks(num_tasks, env_map, seed=None):
 if __name__ == '__main__':
     
     # 1. 生成地图
-    print("正在生成地图")
+    print("正在生成地图...")
     env_map = env_generator(
         rho=0.8, 
         map_size=1500,
