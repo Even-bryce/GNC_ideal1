@@ -41,7 +41,9 @@ class RRTStar:
         self.expand_dis = expand_dis           # 每次扩展的步长
         self.max_iter = max_iter               # 最大迭代次数
         self.obstacle_list = obstacle_list     # 存储障碍物列表
-        self.node_list = [self.start]          # 树节点列表，初始化时只包含起点
+        self.node_list_start = [self.start]          # 起始点为根的树节点列表，初始化时只包含起点
+        self.node_list_goal = [self.goal]            # 目标点为根的树节点列表，初始化时只包含目标点
+        self.merged_node_list = []      # 合并后的节点列表
         self.search_radius = search_radius     # 搜索邻近节点的半径
         self.R_crash = R_crash   # 本体碰撞半径
         self.R_risk = R_risk     # 本体风险半径
@@ -53,96 +55,126 @@ class RRTStar:
         
 
     def planning(self):
-        """
-        主规划函数，用于生成从起点到目标的路径
-        :return: 如果找到路径，返回路径坐标列表；否则返回 None
-        """
 
-        self.goal.cost = float('inf')
+        self.goal.cost = 0.0
         self.goal.parent = None
+
         start_time = time.time()
 
-        for i in range(self.max_iter):  # 循环执行最大迭代次数
-            # 随机采样一个点
+        tree1 = self.node_list_start
+        tree2  = self.node_list_goal
+        merged_tree = self.merged_node_list
+
+        for i in range(self.max_iter):
+
+            # ===== 1. 采样 =====
             if not self.first_path_found:
-                rnd = self.sample_goal(20)
+                rnd = self.sample_goal(20,tree2[0]) 
             else:
                 rnd = self.informed_sample()
+
+            rnd_node = Node(rnd[0], rnd[1], rnd[2])
+
+            # ===== 2. 在当前树中扩展 =====
+            nearest_ind = self.get_nearest_node_index(tree1, rnd)
+            nearest_node = tree1[nearest_ind]
+
+            steer_node = self.steer(nearest_node, rnd_node)
+            new_node = self.apf_steer(steer_node, tree2[0])
+
+            if not self.check_collision(new_node) and not self.check_edge_collision(nearest_node, new_node):
+                
+                # ===== 3. RRT*：choose parent =====
+                near_inds = self.find_near_nodes(new_node, tree1)
+                new_node = self.choose_parent(new_node, near_inds, tree1)
+
+                # ===== 4. RRT*：rewire =====
+                self.rewire(new_node, near_inds, tree1)
+
+                tree1.append(new_node)
+            else:
+                continue
+
+            # ===== 5. Bi-RRT：尝试连接另一棵树 =====
+            connect_ind = self.get_nearest_node_index(tree2,
+                                                    [new_node.x, new_node.y, new_node.z])
+            connect_node = tree2[connect_ind]
+
+            if not self.check_edge_collision(new_node, connect_node):
+
+
+                # 合并两棵树，这里合并还有逻辑没有解决，需要把两个树真正意义上的连接起来，暂时放着                
+                # if new_node in self.node_list_start:
+                #     connect_node.parent = new_node
+                #     self.propagate_cost_to_leaves(connect_node, tree2)
+                # else:
+                #     new_node.parent = connect_node
+                #     self.propagate_cost_to_leaves(new_node, tree1)
+
+                    
+
+
+                path_start = self.generate_path_to_root(new_node)
+                path_goal  = self.generate_path_to_root(connect_node)
+
+                final_path = path_start + path_goal[::-1][1:]
+
+                # 确保路径从起点到终点
+                if final_path[0] != [self.start.x, self.start.y, self.start.z]:
+                    final_path = final_path[::-1]
+                
+                merged_tree = tree1 + tree2
+                self.merged_node_list = merged_tree
+                
+
+                end_time = time.time()
+
             
-            # rnd = self.sample_free()
-        
-            # 找到距离随机点最近的已有节点
-            nearest_ind = self.get_nearest_node_index(self.node_list, rnd)
-            nearest_node = self.node_list[nearest_ind]
-
-            # 计算扩展方向并生成新节点，steer内部会自动计算新节点的成本
-            steer_node = self.steer(nearest_node, Node(rnd[0], rnd[1], rnd[2]))
-            new_node = self.apf_steer(steer_node, self.goal)
-    
-            # 检查新节点是否与障碍物碰撞
-            if (not self.check_collision(new_node) and 
-                    not self.check_edge_collision(nearest_node, new_node)):
-                # 找到新节点附近的节点
-                near_inds = self.find_near_nodes(new_node)
-                # 选择最佳父节点
-                node_with_updated_parent = self.choose_parent(new_node, near_inds) # 重新选择父节点
-                # 如果父节点更新了
-                if node_with_updated_parent:
-                    # 重布线
-                    self.rewire(node_with_updated_parent, near_inds)
-                    # 只有这里才把节点添加到树中
-                    self.node_list.append(node_with_updated_parent)
-                    
-                else:
-                    # 重布线
-                    self.rewire(new_node, near_inds)
-                    # 只有这里才把节点添加到树中
-                    self.node_list.append(new_node)
                 
-                # 记录首次找到路径的信息
                 if not self.first_path_found:
-                    # 1. 尝试寻找是否能连通终点
-                    potential_goal_ind = self.search_best_goal_node()
-                    
-                    # 如果找到了 (不为 None)
-                    if potential_goal_ind is not None:
-                        self.first_path_found = True
-                        self.use_informed_sampling = True
-                        # 计算最短路径下界
-                        
-                        # 生成坐标路径
-                        first_path_coords = self.generate_final_path_from_node(potential_goal_ind)
-                        # 补充终点
-                        first_path_coords.append([self.goal.x, self.goal.y, self.goal.z])
-                        
-                        # 计算纯几何长度
-                        first_path_len = self.calculate_path_length(first_path_coords)
-                        self.c_best = first_path_len
-                        end_time = time.time()
-                        first_time = end_time - start_time
-                        
-                        
-                        if self.search_until_max_iter:
-                            print(f"\n[提示] 发现首条可行路径！迭代次数: {i}")
-                            print(f"[数据] 首条路径物理长度: {first_path_len:.4f} 米")
-                            print(f"[数据] 首条路径计算时间: {first_time:.4f} 秒")
-                        else:
-                            print("[提示] 由于设置为不持续搜索，规划结束。\n")
-                            return first_path_coords
-                
-            temp_goal_ind = self.search_best_goal_node()
-            if temp_goal_ind is not None:
-                temp_path_coords = self.generate_final_path_from_node(temp_goal_ind)
-                temp_path_coords.append([self.goal.x, self.goal.y, self.goal.z])
-                temp_path_len = self.calculate_path_length(temp_path_coords)
-                if temp_path_len < self.c_best:
-                    self.c_best = self.node_list[temp_goal_ind].cost + self.calc_distance(self.node_list[temp_goal_ind], self.goal)
-                        
-        
-        last_index = self.search_best_goal_node()
+                    print(f"[首次成功] Bi-RRT* 找到路径，迭代 {i}")
+                    print(f"[首次耗时] {end_time - start_time:.3f}s")
 
-        if last_index is not None:
-            path_coords = self.generate_final_path_from_node(last_index)
+                self.first_path_found = True
+                self.c_best = self.calculate_path_length(final_path)
+                if not self.search_until_max_iter:
+                    return final_path
+            
+            # ===== 6. 交换扩展方向 =====
+            if tree1[0] is self.start:
+                self.node_list_start = tree1
+                self.node_list_goal = tree2
+            else:
+                self.node_list_start = tree2
+                self.node_list_goal = tree1
+            merged_tree = tree1 + tree2
+            self.merged_node_list = merged_tree
+            tree1, tree2 = tree2, tree1
+            
+            
+            if self.first_path_found:
+                # 如果找到了第一条可行路径，每次找到更优路径都更新 c_best
+                temp_goal_ind = self.search_best_goal_node(self.merged_node_list)
+
+                if temp_goal_ind is not None:
+                    temp_path_coords = self.generate_final_path_from_node(temp_goal_ind, self.merged_node_list)
+                    # 确保路径从起点到终点
+                    if temp_path_coords[0] != [self.start.x, self.start.y, self.start.z]:
+                        temp_path_coords = temp_path_coords[::-1]
+                    temp_path_coords.append([self.goal.x, self.goal.y, self.goal.z])
+                    temp_path_len = self.calculate_path_length(temp_path_coords)
+                    if temp_path_len < self.c_best:
+                        self.c_best = self.merged_node_list[temp_goal_ind].cost + self.calc_distance(self.merged_node_list[temp_goal_ind], self.goal)
+                            
+        # 循环结束后，返回最优最终路径
+        last_index = self.search_best_goal_node(self.merged_node_list)
+        
+
+        if last_index is not None and self.first_path_found:
+            path_coords = self.generate_final_path_from_node(last_index, self.merged_node_list)
+            # 确保路径从起点到终点
+            if path_coords[0] != [self.start.x, self.start.y, self.start.z]:
+                path_coords = path_coords[::-1]
             # 补充终点
             path_coords.append([self.goal.x, self.goal.y, self.goal.z])
             last_time = time.time() - start_time
@@ -151,6 +183,7 @@ class RRTStar:
             return path_coords
     
         return None
+
 
 # --------------------------sample-------------------------- 
     def sample_free(self):
@@ -164,17 +197,16 @@ class RRTStar:
                rnd_gen.uniform(self.min_rand, self.z_rand)]
         return rnd
     
-    def sample_goal(self, goal_sample_rate):
+    def sample_goal(self, goal_sample_rate, target_node):
         """
-        根据给定的采样率决定是否采样目标点
-        :param goal_sample_rate: 采样目标点的概率（0-100）
-        :return: 采样点的坐标 [x, y, z]
+        Bi-RRT 目标偏置采样
+        :param goal_sample_rate: 0-100
+        :param target_node: 对面树的根节点（Node）
         """
-        rnd_gen2 = random.Random()    
-        if rnd_gen2.randint(0, 99) > goal_sample_rate:
+        if random.randint(0, 99) > goal_sample_rate:
             return self.sample_free()
         else:
-            return [self.goal.x, self.goal.y, self.goal.z]
+            return [target_node.x, target_node.y, target_node.z]
     
     def informed_sample(self):
         # 非 informed 时回默认
@@ -343,6 +375,34 @@ class RRTStar:
         
         return new_node
 
+    def extend_star(self, tree_nodes, rnd):
+        # 1. 最近节点
+        nearest_ind = self.get_nearest_node_index(tree_nodes, rnd)
+        nearest_node = tree_nodes[nearest_ind]
+
+        # 2. steer / APF
+        steer_node = self.steer(nearest_node, Node(rnd[0], rnd[1], rnd[2]))
+        new_node = self.apf_steer(steer_node, self.goal)
+
+        # 3. 碰撞检测
+        if self.check_collision(new_node):
+            return None
+        if self.check_edge_collision(nearest_node, new_node):
+            return None
+
+        # 4. choose parent（局部最优）
+        near_inds = self.find_near_nodes(new_node)
+        new_node = self.choose_parent(new_node, near_inds) or new_node
+
+        # 5. rewire（RRT* 精髓）
+        self.rewire(new_node, near_inds)
+
+        # 6. 加入当前树
+        tree_nodes.append(new_node)
+
+        return new_node
+
+    
 # ----------------------------rewire----------------------------
     # def choose_parent(self, new_node, near_inds):
     #     """
@@ -374,20 +434,20 @@ class RRTStar:
     #     new_node.parent = self.node_list[min_ind]
     #     return new_node
 
-    def choose_parent(self, new_node, near_inds):
+    def choose_parent(self, new_node, near_inds, tree):
         """
         选择最佳父节点，不steer直接连接
         :param new_node: 新节点
         :param near_inds: 附近节点的索引
-        :return: 更新后的新节点
+        :return: 更新父节点后的新节点，而不是返回父节点
         
         """
         if not near_inds:
-            return None
+            return new_node
 
         costs = []
         for i in near_inds:
-            near_node = self.node_list[i]
+            near_node = tree[i]
             if  not self.check_edge_collision(near_node, new_node):
                 costs.append(near_node.cost + self.calc_distance(near_node, new_node) + self.risk_cost(new_node))
             else:
@@ -395,19 +455,19 @@ class RRTStar:
 
         min_cost = min(costs)
         if min_cost == float("inf"):
-            return None
+            return new_node
 
         min_ind = near_inds[costs.index(min_cost)]
         # new node不变化，直接连接
         new_node.cost = min_cost
-        new_node.parent = self.node_list[min_ind]
+        new_node.parent = tree[min_ind]
         return new_node     
 
-    def rewire(self, new_node, near_inds):
+    def rewire(self, new_node, near_inds, tree):
         
 
         for i in near_inds:
-            near_node = self.node_list[i]
+            near_node = tree[i]
             
             
             # 不生成新点，而是计算“如果直连”的距离
@@ -424,17 +484,17 @@ class RRTStar:
 
                     near_node.parent = new_node
                     near_node.cost = new_cost
-                    self.propagate_cost_to_leaves(near_node)
+                    self.propagate_cost_to_leaves(near_node, tree)
 
-    def propagate_cost_to_leaves(self, parent_node):
+    def propagate_cost_to_leaves(self, parent_node, tree):
         '''
         递归更新子节点的成本
         '''
         #print('check_propagate')
-        for node in self.node_list:
+        for node in tree:
             if node.parent == parent_node:
                 node.cost = self.calc_distance(parent_node, node) + parent_node.cost + self.risk_cost(node)
-                self.propagate_cost_to_leaves(node)
+                self.propagate_cost_to_leaves(node, tree)
         
         return
 
@@ -450,12 +510,17 @@ class RRTStar:
         dlist = [(node.x - rnd[0]) ** 2 + (node.y - rnd[1]) ** 2 + (node.z - rnd[2]) ** 2 for node in node_list]
         return dlist.index(min(dlist))
 
-    def search_best_goal_node(self):
+    def search_best_goal_node(self, tree):
         """
-        在树中搜索距离目标点最近且可达的节点
+        在树中搜索除目标点本身距离目标点最近且可达的节点
         :return: 最佳目标节点的索引，如果不存在则返回 None
         """
-        dist_to_goal_list = [self.calc_dist_to_goal(n.x, n.y, n.z) for n in self.node_list]
+
+        dist_to_goal_list = [
+                    self.calc_dist_to_goal(n.x, n.y, n.z) if n is not self.goal else float('inf')
+                    for n in tree
+                            ]
+        
         goal_inds = [
             dist_to_goal_list.index(i) for i in dist_to_goal_list
             if i <= self.expand_dis
@@ -463,44 +528,71 @@ class RRTStar:
 
         safe_goal_inds = []
         for goal_ind in goal_inds:
-            t_node = self.steer(self.node_list[goal_ind], self.goal)
+            t_node = self.steer(tree[goal_ind], self.goal)
             if not self.check_collision(t_node) and not self.check_edge_collision(t_node, self.goal):
                 safe_goal_inds.append(goal_ind)
 
         if not safe_goal_inds:
             return None
 
-        min_cost = min([self.node_list[i].cost for i in safe_goal_inds])
+        min_cost = min([tree[i].cost for i in safe_goal_inds])
         for i in safe_goal_inds:
-            if self.node_list[i].cost == min_cost:
+            if tree[i].cost == min_cost:
                 return i
 
         return None
 
 
-    def generate_final_path_from_node(self, end_node_index):
-        end_node = self.node_list[end_node_index]
+    def generate_final_path_from_node(self, end_node_index, tree):
+        end_node = tree[end_node_index]
         path = [[end_node.x, end_node.y, end_node.z]]
         node = end_node
         while node.parent is not None:
             node = node.parent
             path.append([node.x, node.y, node.z])
         return path[::-1]
+    
+    def generate_path_to_root(self, node):
+        path = []
+        while node is not None:
+            path.append([node.x, node.y, node.z])
+            node = node.parent
+        return path[::-1]
 
-    def find_near_nodes(self, new_node):
+    def find_near_nodes(self, new_node, tree):
         """
-        找到新节点附近的节点索引
-        :param new_node: 新节点
-        :return: 附近节点的索引列表
+        在指定树 tree 中找到 new_node 附近的节点索引
         """
-        nnode = len(self.node_list) + 1
-        r = self.search_radius * math.sqrt(math.log(nnode) / nnode)  # 动态调整搜索半径
-        r = min(r, self.search_radius) # 限制最大搜索半径
-        r = max(r, 1.5*self.expand_dis) # 限制最小搜索半径，这个如果删除了大部分节点都不会进入重连阶段，没有优化
-        dlist = [(node.x - new_node.x) ** 2 + (node.y - new_node.y) ** 2 + (node.z - new_node.z) ** 2 for node in self.node_list]
-        near_inds = [i for i in range(len(dlist)) if dlist[i] <= r ** 2]
+        nnode = len(tree) + 1
+
+        r = self.search_radius * math.sqrt(math.log(nnode) / nnode)
+        r = min(r, self.search_radius)
+        r = max(r, 1.5 * self.expand_dis)
+
+        dlist = [
+            (node.x - new_node.x) ** 2 +
+            (node.y - new_node.y) ** 2 +
+            (node.z - new_node.z) ** 2
+            for node in tree
+        ]
+
+        near_inds = [i for i, d in enumerate(dlist) if d <= r ** 2]
         return near_inds
     
+    def try_connect_other_tree(self, new_node, other_tree):
+        '''
+        判断是否能连接到另一棵树
+        ''' 
+        idx = self.get_nearest_node_index(
+            other_tree,
+            [new_node.x, new_node.y, new_node.z]
+        )
+        near_node = other_tree[idx]
+
+        if not self.check_edge_collision(new_node, near_node):
+            return near_node
+
+        return None
     # --------------------------工具函数--------------------------
     def check_collision(self, node):
         """
@@ -627,7 +719,6 @@ class RRTStar:
         """
         return math.sqrt((node1.x - node2.x) ** 2 + (node1.y - node2.y) ** 2 + (node1.z - node2.z) ** 2)
     
-
     def calculate_path_length(self, path):
         length = 0
         for i in range(len(path) - 1):
@@ -734,7 +825,7 @@ if __name__ == '__main__':
             expand_dis=30,    # 步长
             max_iter=3000,    # 迭代次数
             search_radius=150, # 搜索半径
-            search_until_max_iter=False  # 持续搜索以优化路径
+            search_until_max_iter=False  # 持续搜索以优化路径，保持常驻false，因为bi-rrt*利用剩余迭代次数优化不符合单RRT*的渐进最优性
         )
         start_time = time.time()
         path = planner.planning()
@@ -748,7 +839,7 @@ if __name__ == '__main__':
             success_times.append(elapsed)
             path_lengths.append(plen)
             print(f"{i+1:<10} | {'Success':<10} | {elapsed:<10.4f} | {plen:<10.4f}")
-            plot_tree_and_path(env_map, planner.node_list, path)
+            plot_tree_and_path(env_map, planner.merged_node_list, path)
             # # 优化路径
             # opt = PathOptimizer(env_map, safety_margin=0.5)
 
