@@ -19,7 +19,7 @@ class Node:
 
 # 定义 RRTStar 类，用于实现 RRT* 算法
 class RRTStar:
-    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=25, max_iter=1500, search_radius=20.0, N_layers = 3, random_seed=None ):
+    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=25, max_iter=1500, search_radius=20.0, N_layers = 3, search_until_max_iter=True):
         """
         初始化 RRT* 算法的参数
         :param start: 起点坐标 [x, y, z]
@@ -42,87 +42,101 @@ class RRTStar:
         self.obstacle_list = obstacle_list     # 存储障碍物列表
         self.node_list = [self.start]          # 树节点列表，初始化时只包含起点
         self.search_radius = search_radius     # 搜索邻近节点的半径
-        self.R_crash = R_crash          # 本体碰撞半径
-        self.R_risk = R_risk            # 本体风险半径
-        self.N_layers = N_layers        # 向上溯源层数
-        
-        import random as rand_module
-        self.random = rand_module.Random()
-        if random_seed is not None:
-            self.random.seed(random_seed)
+        self.R_crash = R_crash                 # 本体碰撞半径
+        self.R_risk = R_risk                   # 本体风险半径
+        self.N_layers = N_layers               # 向上溯源层数
+        self.search_until_max_iter = search_until_max_iter  # 是否持续搜索直到最大迭代次数
 
     def planning(self):
         """
         主规划函数，用于生成从起点到目标的路径
-        :return: 如果找到路径，返回路径坐标列表；否则返回 None
+        返回首次找到的可行路径、循环结束后找到的最优路径；否则返回 None
         """
-        min_cost = float('inf') 
         self.goal.cost = float('inf')
         self.goal.parent = None
         
         first_path_found = False
         first_path = None
         iteration_find_path = 0
-        first_path_cost = float('inf')
-        first_path_goal_parent = None  # 记录首次找到路径时goal的父节点
-        start_time = time.time()
 
+        start_time = time.time()
+        
         for i in range(self.max_iter):  # 循环执行最大迭代次数
-            # 随机采样一个点
-            rnd = [self.random.uniform(self.min_rand, self.max_rand),
-                   self.random.uniform(self.min_rand, self.max_rand),
-                   self.random.uniform(self.min_rand, self.z_rand)]
+            # 随机采样
+            rnd = self.sample_free()
 
             # 找到距离随机点最近的已有节点
             nearest_ind = self.get_nearest_node_index(self.node_list, rnd)
             nearest_node = self.node_list[nearest_ind]
-
+            
             # 计算扩展方向并生成新节点
             new_node = self.steer(nearest_node, Node(rnd[0], rnd[1], rnd[2]))
-
+            
             # 检查新节点是否与障碍物碰撞
             if (not self.check_collision(new_node) and 
                     not self.check_edge_collision(nearest_node, new_node)):
                 # 找到新节点附近的节点
                 near_inds = self.find_near_nodes(new_node)
                 # 选择最佳父节点
-                new_node = self.choose_parent(new_node, near_inds)
-                self.node_list.append(new_node)  # 将新节点加入树中
-                # 重新连接邻近节点以优化路径
+                new_node = self.choose_parent(new_node, nearest_node, near_inds)
+                # 将新节点加入树中
+                self.node_list.append(new_node)  
+                # 重新连接邻近节点
                 self.rewire(new_node, near_inds)
 
-                # 检查新节点是否接近目标
-                if self.calc_dist_to_goal(new_node.x, new_node.y, new_node.z) <= self.expand_dis:
-                        # 尝试连接到真正的 Goal 点
-                        final_node = self.steer(new_node, self.goal)
-                        if not self.check_collision(final_node) and not self.check_edge_collision(new_node, final_node):
-                            # 当前总成本
-                            current_total_cost = new_node.cost + self.calc_distance(new_node, final_node)
-                            
-                            # 首次找到路径
-                            if not first_path_found:
-                                first_path_found = True
-                                # 创建一个临时的goal节点来保存首次路径
-                                temp_goal = Node(self.goal.x, self.goal.y, self.goal.z)
-                                temp_goal.parent = new_node
-                                temp_goal.cost = current_total_cost
-                                first_path = self.generate_final_path_from_node(temp_goal)
-                                iteration_find_path = i
-                                end_time = time.time()
-                                time_first = end_time - start_time
-                            
-                            if current_total_cost < min_cost:
-                                min_cost = current_total_cost
-                                # 临时将 goal 的父节点指向 new_node 来生成路径
-                                self.goal.parent = new_node 
-                                self.goal.cost = current_total_cost
+                # 未找到路径时
+                if not first_path_found:
+                    # 寻找可直接连接到目标点的节点
+                    potential_goal_ind = self.search_best_goal_node()
+                    # 若存在可直连的节点
+                    if potential_goal_ind is not None:
+                        first_path_found = True
+                        # 生成路径
+                        first_path = self.generate_final_path_from_node(potential_goal_ind)
+                        # 补充终点
+                        first_path.append([self.goal.x, self.goal.y, self.goal.z])
+                        
+                        # 首次找到路径的迭代轮数与时间       
+                        iteration_find_path = i
+                        end_time = time.time()
+                        time_first = end_time - start_time
+                        
+                        # 可设：找到首次路径就停止
+                        if not self.search_until_max_iter:
+                            return time_first, iteration_find_path, first_path, first_path
         
-        # 循环结束后返回找到的最优路径
-        if self.goal.parent is not None:
-            final_best_path = self.generate_final_path_from_node(self.goal)
-            return time_first, iteration_find_path, first_path, final_best_path
-            
+        last_index = self.search_best_goal_node()
+
+        if last_index is not None:
+            # 用剩余迭代次数优化后的路径
+            final_best_path = self.generate_final_path_from_node(last_index)
+            # 补充终点
+            final_best_path.append([self.goal.x, self.goal.y, self.goal.z])
+            return time_first, iteration_find_path, first_path, final_best_path 
+
         return None, None, None, None
+    
+    def sample_free(self):
+        """
+        随机采样一个点
+        :return: 随机点的坐标 [x, y, z]
+        """
+        rnd_gen = random.Random()
+        rnd = [rnd_gen.uniform(self.min_rand, self.max_rand),
+               rnd_gen.uniform(self.min_rand, self.max_rand),
+               rnd_gen.uniform(self.min_rand, self.z_rand)]
+        return rnd
+    
+    def sample_goal(self, goal_sample_rate):
+        """
+        根据给定的采样率决定是否采样目标点
+        :param goal_sample_rate: 采样目标点的概率（0-100）
+        :return: 采样点的坐标 [x, y, z]
+        """
+        if random.randint(0, 100) > goal_sample_rate:
+            return self.sample_free()
+        else:
+            return [self.goal.x, self.goal.y, self.goal.z]
     
     def get_nearest_node_index(self, node_list, rnd):
         """
@@ -134,9 +148,8 @@ class RRTStar:
         dlist = [(node.x - rnd[0]) ** 2 + (node.y - rnd[1]) ** 2 + (node.z - rnd[2]) ** 2 for node in node_list]
         return dlist.index(min(dlist))
 
-    
-
-    def generate_final_path_from_node(self, end_node):
+    def generate_final_path_from_node(self, end_node_index):
+        end_node = self.node_list[end_node_index]
         path = [[end_node.x, end_node.y, end_node.z]]
         node = end_node
         while node.parent is not None:
@@ -150,9 +163,11 @@ class RRTStar:
         :param new_node: 新节点
         :return: 附近节点的索引列表
         """
-        nnode = len(self.node_list)
+        nnode = len(self.node_list) + 1
         r = self.search_radius * math.sqrt(math.log(nnode) / nnode)  # 动态调整搜索半径
-        r = min(r, self.search_radius) # 限制最大搜索半径
+        # 限制最大、最小搜索半径
+        r = min(r, self.search_radius)
+        r = max(r, 1.5 * self.expand_dis)
         dlist = [(node.x - new_node.x) ** 2 + (node.y - new_node.y) ** 2 + (node.z - new_node.z) ** 2 for node in self.node_list]
         near_inds = [i for i in range(len(dlist)) if dlist[i] <= r ** 2]
         return near_inds
@@ -191,7 +206,7 @@ class RRTStar:
         candi_inds = list(candi_inds)  # 转换为列表
         return candi_inds
     
-    def choose_parent(self, new_node, near_inds):
+    def choose_parent(self, new_node, nearest_node, near_inds):
         """
         选择最佳父节点
         :param new_node: 新节点
@@ -202,25 +217,34 @@ class RRTStar:
             return new_node
         
         candi_inds = self.get_candi_inds(near_inds)
-        costs = []
         
+        # 以nearest_node作为初始父节点
+        min_node = nearest_node
+        min_cost = nearest_node.cost + self.calc_distance(nearest_node, new_node)
+
         for i in candi_inds:
             near_node = self.node_list[i]
-            t_node = self.steer(near_node, new_node)
-            if t_node and not self.check_collision(t_node):
-                costs.append(near_node.cost + self.calc_distance(near_node, t_node) + self.risk_cost(t_node))
-            else:
-                costs.append(float("inf"))  # 碰撞或无法连接
+            # 计算“起点——临近节点——新节点”的路径成本
+            new_cost = near_node.cost + self.calc_distance(new_node, near_node) + self.risk_cost(new_node)
+            
+            # 路径成本减少，则进行碰撞检测
+            if new_cost < min_cost:
+                if not self.check_edge_collision(new_node, near_node):
+                    min_node = near_node
+                    min_cost = new_cost
 
-        min_cost = min(costs)
-        if min_cost == float("inf"):
-            return new_node
-
-        min_ind = candi_inds[costs.index(min_cost)]
-        new_node = self.steer(self.node_list[min_ind], new_node)
         new_node.cost = min_cost
-        new_node.parent = self.node_list[min_ind]
+        new_node.parent = min_node
         return new_node
+    
+    def propagate_cost_to_leaves(self, parent_node):
+        '''
+        递归更新子节点的成本
+        '''
+        for node in self.node_list:
+            if node.parent == parent_node:
+                node.cost = self.calc_distance(parent_node, node) + parent_node.cost + self.risk_cost(node)
+                self.propagate_cost_to_leaves(node)
 
     def steer(self, from_node, to_node):
         """
@@ -254,30 +278,46 @@ class RRTStar:
         candi_inds = self.get_candi_inds(near_inds)
         for i in candi_inds:
             near_node = self.node_list[i]
-            t_node = self.steer(new_node, near_node)
-            if t_node and not self.check_collision(t_node):
-                if near_node.cost > new_node.cost + self.calc_distance(new_node, t_node) + self.risk_cost(new_node):
+            
+            # 计算“起点——新节点——临近节点”的路径成本
+            dist_to_edge = self.calc_distance(new_node, near_node)
+            new_cost = new_node.cost + dist_to_edge + self.risk_cost(near_node)
+
+            # 路径成本减少，则进行碰撞检测
+            if new_cost < near_node.cost:
+                if not self.check_edge_collision(new_node, near_node):
+                    # 更新节点关系
                     near_node.parent = new_node
-                    near_node.cost = new_node.cost + self.calc_distance(new_node, t_node) + self.risk_cost(new_node)
-                    
-    def update_children_cost(self, node):
+                    near_node.cost = new_cost
+                    self.propagate_cost_to_leaves(near_node)
+
+    def search_best_goal_node(self):
         """
-        递归更新节点所有子节点的代价
+        在树中搜索距目标点一定半径内且可达的节点
+        :return: 最佳目标节点的索引，如果不存在则返回 None
         """
-        for child in self.get_children(node):
-            if child.parent == node:
-                child.cost = node.cost + self.calc_distance(node, child) + self.risk_cost(child)
-                self.update_children_cost(child)
+        best_index = None
+        min_total_cost = float('inf')
+        
+        # 避免遍历过多节点，仅在终点周围搜索
+        search_radius = 5 * self.expand_dis
+        
+        for i, node in enumerate(self.node_list):
+            # 计算树中所有节点到目标的距离
+            dist_to_goal = self.calc_distance(node, self.goal)
+            
+            # 如果节点在搜索半径内
+            if dist_to_goal <= search_radius:
+                # 计算“起点——节点——直连终点”的路径成本
+                total_cost = node.cost + dist_to_goal
+                # 判断节点到终点是否无碰撞
+                if not self.check_edge_collision(node, self.goal):
+                    if total_cost < min_total_cost:
+                        min_total_cost = total_cost
+                        best_index = i
+        
+        return best_index
                 
-    def get_children(self, node):
-        """
-        获取节点的所有子节点
-        """
-        children = []
-        for n in self.node_list:
-            if n.parent == node:
-                children.append(n)
-        return children
     # --------------------------工具函数--------------------------
     def check_collision(self, node):
         """
@@ -468,14 +508,14 @@ if __name__ == '__main__':
     # 1. 生成地图
     print("正在生成地图...")
     env_map = env_generator(
-        rho=0.3, 
+        rho=0.6, 
         map_size=1500,
-        r_crash_range=(30, 120),
-        r_risk_range=(0, 10),
+        r_crash_range=(30, 50),
+        r_risk_range=(3, 7),
         zmax_range=(30, 240),
-        z_size=300,
+        z_size=240,
         max_iter=5000,
-        seed=42
+        seed=40
     )
     obstacle_list = env_map["obstacles"]
     print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。")
@@ -485,7 +525,7 @@ if __name__ == '__main__':
     # print("正在生成", num_of_tasks, "对合法的起终点")
     # tasks = generate_valid_tasks(num_of_tasks, env_map, seed=100)
     tasks = [([0,0,0],[1500, 1500, 50]),([0, 1500, 0],[1500, 0, 150])] # 对角线起终点
-    plot_map(env_map)
+    # plot_map(env_map)
     # 3. 运行测试
     success_times = []
     path_lengths = []
@@ -498,7 +538,7 @@ if __name__ == '__main__':
     print("-" * 80)
     
     # 对每个起终点，进行num_pf_tests次规划
-    num_of_tests = 1
+    num_of_tests = 50
     for i, (start, goal) in enumerate(tasks):
         env_first_times = []
         env_final_times = []
@@ -515,9 +555,9 @@ if __name__ == '__main__':
                 R_risk=r_agent_risk, 
                 obstacle_list=obstacle_list, 
                 rand_area=[0, env_map["size"], env_map["z_size"]], 
-                expand_dis=30,    # 步长
+                expand_dis=100,    # 步长
                 max_iter=1000,    # 迭代次数
-                search_radius=60.0,
+                search_radius=120.0,
                 N_layers = 3
             )
             start_time = time.time()

@@ -575,9 +575,9 @@ if __name__ == '__main__':
                 R_risk=r_agent_risk, 
                 obstacle_list=obstacle_list, 
                 rand_area=[0, env_map["size"], env_map["z_size"]], 
-                expand_dis=40,    # 步长
+                expand_dis=100,    # 步长
                 max_iter=1000,    # 迭代次数
-                search_radius=60.0
+                search_radius=120.0
             )
             start_time = time.time()
             time_first, iteration_find_path, first_path, final_best_path = rrt_star.planning()

@@ -19,7 +19,7 @@ class Node:
 
 # 定义 RRTStar 类，用于实现 RRT* 算法
 class RRTStar:
-    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=25, max_iter=1500, search_radius=20.0, search_until_max_iter=False):
+    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=25, max_iter=1500, search_radius=20.0, search_until_max_iter=True):
         """
         初始化 RRT* 算法的参数
         :param start: 起点坐标 [x, y, z]
@@ -61,7 +61,7 @@ class RRTStar:
         start_time = time.time()
         
         for i in range(self.max_iter):  # 循环执行最大迭代次数
-            # 随机采样
+            # 目标偏置采样
             rnd = self.sample_goal(20)
 
             # 找到距离随机点最近的已有节点
@@ -497,7 +497,7 @@ if __name__ == '__main__':
     print("-" * 80)
     
     # 对每个起终点，进行num_pf_tests次规划
-    num_of_tests = 20
+    num_of_tests = 50
     for i, (start, goal) in enumerate(tasks):
         env_first_times = []
         env_final_times = []
@@ -514,9 +514,9 @@ if __name__ == '__main__':
                 R_risk=r_agent_risk, 
                 obstacle_list=obstacle_list, 
                 rand_area=[0, env_map["size"], env_map["z_size"]], 
-                expand_dis=30,    # 步长
+                expand_dis=20,    # 步长
                 max_iter=1000,    # 迭代次数
-                search_radius=60.0
+                search_radius=120.0
             )
             start_time = time.time()
             time_first, iteration_find_path, first_path, final_best_path = rrt_star.planning()

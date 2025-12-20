@@ -19,7 +19,7 @@ class Node:
 
 # 定义 RRTStar 类，用于实现 RRT* 算法
 class RRTStar:
-    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=25, max_iter=1500, search_radius=20.0, search_until_max_iter=True):
+    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=25, max_iter=1500, search_radius=20.0, backward_generation = 3, search_until_max_iter=True):
         """
         初始化 RRT* 算法的参数
         :param start: 起点坐标 [x, y, z]
@@ -36,20 +36,21 @@ class RRTStar:
         self.goal = Node(goal[0], goal[1], goal[2])     # 创建目标节点
         self.min_rand = rand_area[0]           # 随机采样区域的最小值
         self.max_rand = rand_area[1]           # 随机采样区域的最大值
-        self.z_rand = rand_area[2]          # 随机采样区域的最大z值
+        self.z_rand = rand_area[2]             # 随机采样区域的最大z值
         self.expand_dis = expand_dis           # 每次扩展的步长
         self.max_iter = max_iter               # 最大迭代次数
         self.obstacle_list = obstacle_list     # 存储障碍物列表
         self.node_list = [self.start]          # 树节点列表，初始化时只包含起点
         self.search_radius = search_radius     # 搜索邻近节点的半径
-        self.R_crash = R_crash   # 本体碰撞半径
-        self.R_risk = R_risk     # 本体风险半径
+        self.R_crash = R_crash                 # 本体碰撞半径
+        self.R_risk = R_risk                   # 本体风险半径
+        self.backward_generation = backward_generation      # 反向回溯层数
         self.search_until_max_iter = search_until_max_iter  # 是否持续搜索直到最大迭代次数
 
     def planning(self):
         """
         主规划函数，用于生成从起点到目标的路径
-        返回首次找到的可行路径，和循环结束后找到的最优路径；否则返回 None
+        返回首次找到的可行路径、循环结束后找到的最优路径；否则返回 None
         """
         self.goal.cost = float('inf')
         self.goal.parent = None
@@ -62,17 +63,14 @@ class RRTStar:
         
         for i in range(self.max_iter):  # 循环执行最大迭代次数
             # 随机采样
-            rnd = self.sample_goal(20)
+            rnd = self.sample_free()
 
             # 找到距离随机点最近的已有节点
             nearest_ind = self.get_nearest_node_index(self.node_list, rnd)
             nearest_node = self.node_list[nearest_ind]
             
             # 计算扩展方向并生成新节点
-            steer_node = self.steer(nearest_node, Node(rnd[0], rnd[1], rnd[2]))
-            steer_node.parent = nearest_node
-            self.node_list.append(steer_node)
-            new_node = self.apf_steer(steer_node, self.goal)
+            new_node = self.steer(nearest_node, Node(rnd[0], rnd[1], rnd[2]))
             
             # 检查新节点是否与障碍物碰撞
             if (not self.check_collision(new_node) and 
@@ -173,11 +171,42 @@ class RRTStar:
         dlist = [(node.x - new_node.x) ** 2 + (node.y - new_node.y) ** 2 + (node.z - new_node.z) ** 2 for node in self.node_list]
         near_inds = [i for i in range(len(dlist)) if dlist[i] <= r ** 2]
         return near_inds
-
+    
+    def find_node_index(self, node):
+        """
+        查找节点在node_list中的索引
+        :param node: 要查找的节点
+        :return: 节点的索引，如果找不到返回-1
+        """
+        for i, n in enumerate(self.node_list):
+            if n == node:
+                return i
+        return -1
+    
+    def get_ancestor_inds(self, node_inds):
+        """
+        获得某节点向上 backward_generation 代的所有祖先节点的索引，包括自己
+        """
+        candi_inds = [node_inds]
+        current_node = self.node_list[node_inds]
+        # 回溯祖先节点
+        for _ in range(self.backward_generation):
+            if current_node.parent is not None:
+                # 找到父节点在node_list中的索引
+                parent_index = self.find_node_index(current_node.parent)
+                # 加入candi_inds    
+                candi_inds.append(parent_index)
+                current_node = current_node.parent
+            else:
+                break
+        
+        return candi_inds
+    
     def choose_parent(self, new_node, nearest_node, near_inds):
         """
         选择最佳父节点
         :param new_node: 新节点
+        :param nearest_node: 最近的节点
         :param near_inds: 附近节点的索引
         :return: 更新后的新节点
         """
@@ -195,7 +224,21 @@ class RRTStar:
                 if not self.check_edge_collision(new_node, near_node):
                     min_node = near_node
                     min_cost = new_cost
+                    
+        # 从最早的祖先节点开始，检查是否可以直连new_node
+        # ancest_node_inds = [min_node, min_node.parent, min_node.parent.parent, ...]
+        ancest_node_inds = self.get_ancestor_inds(self.find_node_index(min_node))
 
+        for i in range(len(ancest_node_inds) - 1, -1, -1):
+            ancestor_index = ancest_node_inds[i]
+            ancestor_node = self.node_list[ancestor_index]
+            ancestor_cost = ancestor_node.cost + self.calc_distance(new_node, ancestor_node) + self.risk_cost(new_node)
+            if ancestor_cost < min_cost:
+                if not self.check_edge_collision(new_node, ancestor_node):
+                    min_node = ancestor_node
+                    min_cost = ancestor_cost
+                    # 从最早的祖先节点开始，找到第一个可直连的祖先节点就停止
+                    break  
         new_node.cost = min_cost
         new_node.parent = min_node
         return new_node
@@ -208,7 +251,7 @@ class RRTStar:
             if node.parent == parent_node:
                 node.cost = self.calc_distance(parent_node, node) + parent_node.cost + self.risk_cost(node)
                 self.propagate_cost_to_leaves(node)
-    
+
     def steer(self, from_node, to_node):
         """
         从 from_node 向 to_node 扩展一个新节点
@@ -231,76 +274,7 @@ class RRTStar:
             new_node.parent = from_node
             new_node.cost = from_node.cost + self.expand_dis + self.risk_cost(new_node)
             return new_node
-        
-    def apf_steer(self, from_node, to_node):
-        """
-        从 from_node 向 to_node 扩展一个新节点
-        :param from_node: 起始节点
-        :param to_node: 目标节点
-        :return: 新节点
-        """
-        # 计算原始方向向量
-        dx = to_node.x - from_node.x
-        dy = to_node.y - from_node.y
-        dz = to_node.z - from_node.z
-        
-        dist = math.sqrt(dx**2 + dy**2 + dz**2)
-        
-        # 计算吸引力（指向目标）
-        if dist > 1e-3:
-            att_direction = np.array([dx, dy, dz]) / dist
-        else:
-            att_direction = np.array([0, 0, 0])
-        
-        # 计算排斥力（远离障碍物）
-        rep_force = np.array([0.0, 0.0, 0.0])
-        
-        for obstacle in self.obstacle_list:
-            obs_x, obs_y, zmin, zmax, r_crash, r_risk = obstacle
-            
-            if not (zmin <= from_node.z <= zmax):
-                continue
-            
-            # 计算节点到障碍物的水平距离
-            obs_dx = from_node.x - obs_x
-            obs_dy = from_node.y - obs_y
-            dist_to_obs = math.sqrt(obs_dx**2 + obs_dy**2)
-            
-            # 检查是否在障碍物的风险半径内
-            if dist_to_obs < r_risk:
-                obs_direction = np.array([obs_dx, obs_dy, 0]) / dist_to_obs
-            else:
-                obs_direction = np.array([0, 0, 0])
-                    
-            rep_strength = 20 * (1.0 - dist_to_obs / r_risk)
-            rep_force += rep_strength * obs_direction
-        
-        # 计算合力方向
-        total_force = att_direction + rep_force
-        
-        # 归一化合力方向
-        force_magnitude = np.linalg.norm(total_force)
-        
-        if force_magnitude > 1e-3:
-            final_direction = total_force / force_magnitude
-        else:
-            # 合力很小时，使用随机方向
-            random_dir = np.random.randn(3)
-            final_direction = random_dir / np.linalg.norm(random_dir)
-        
-        # 创建新节点
-        new_node = Node(
-            from_node.x + self.expand_dis * final_direction[0],
-            from_node.y + self.expand_dis * final_direction[1],
-            from_node.z + self.expand_dis * final_direction[2]
-        )
-        
-        # 计算新节点的代价
-        new_node.parent = from_node
-        new_node.cost = from_node.cost + self.expand_dis + self.risk_cost(new_node)
-        
-        return new_node
-    
+
     def rewire(self, new_node, near_inds):
         """
         重新连接邻近节点以优化路径
@@ -310,16 +284,33 @@ class RRTStar:
         for i in near_inds:
             near_node = self.node_list[i]
             
-            # 计算“起点——新节点——临近节点”的路径成本
-            dist_to_edge = self.calc_distance(new_node, near_node)
-            new_cost = new_node.cost + dist_to_edge + self.risk_cost(near_node)
-
-            # 路径成本减少，则进行碰撞检测
-            if new_cost < near_node.cost:
+            # 计算“起点——新节点的父节点——临近节点”的路径成本，若无碰撞则设为父节点
+            cost_via_parent_of_xnew = (new_node.parent).cost + self.calc_distance(new_node.parent, near_node) + self.risk_cost(near_node)
+            if cost_via_parent_of_xnew < near_node.cost:
+                if not self.check_edge_collision(new_node.parent, near_node):
+                    # 更新节点关系
+                    near_node.parent = new_node.parent
+                    near_node.cost = cost_via_parent_of_xnew
+                    self.propagate_cost_to_leaves(near_node)
+                    continue
+            
+            # 计算“起点——新节点——临近节点”的路径成本，若无碰撞则设为父节点
+            cost_via_xnew = new_node.cost + self.calc_distance(new_node, near_node) + self.risk_cost(near_node)
+            if cost_via_xnew < near_node.cost:
                 if not self.check_edge_collision(new_node, near_node):
                     # 更新节点关系
                     near_node.parent = new_node
-                    near_node.cost = new_cost
+                    near_node.cost = cost_via_xnew
+                    self.propagate_cost_to_leaves(near_node)
+                    continue
+                
+            # 考察“起点——临近节点的祖节点——临近节点”的路径，若无碰撞则设为父节点
+            if near_node.parent is not None and (near_node.parent).parent is not None:
+                ancestor_node = (near_node.parent).parent
+                if not self.check_edge_collision(ancestor_node, near_node):
+                    # 更新节点关系
+                    near_node.parent = ancestor_node
+                    near_node.cost = ancestor_node.cost + self.calc_distance(ancestor_node, near_node) + self.risk_cost(near_node)
                     self.propagate_cost_to_leaves(near_node)
 
     def search_best_goal_node(self):
@@ -550,7 +541,8 @@ if __name__ == '__main__':
     )
     obstacle_list = env_map["obstacles"]
     print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。")
-
+    # plot_map(env_map)
+    
     # 2. 生成一定数量的起终点
     num_of_tasks = 1
     # print("正在生成", num_of_tasks, "对合法的起终点")
@@ -586,7 +578,7 @@ if __name__ == '__main__':
                 R_risk=r_agent_risk, 
                 obstacle_list=obstacle_list, 
                 rand_area=[0, env_map["size"], env_map["z_size"]], 
-                expand_dis=100,    # 步长
+                expand_dis=40,    # 步长
                 max_iter=1000,    # 迭代次数
                 search_radius=120.0
             )

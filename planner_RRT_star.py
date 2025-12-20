@@ -36,14 +36,14 @@ class RRTStar:
         self.goal = Node(goal[0], goal[1], goal[2])     # 创建目标节点
         self.min_rand = rand_area[0]           # 随机采样区域的最小值
         self.max_rand = rand_area[1]           # 随机采样区域的最大值
-        self.z_rand = rand_area[2]          # 随机采样区域的最大z值
+        self.z_rand = rand_area[2]             # 随机采样区域的最大z值
         self.expand_dis = expand_dis           # 每次扩展的步长
         self.max_iter = max_iter               # 最大迭代次数
         self.obstacle_list = obstacle_list     # 存储障碍物列表
         self.node_list = [self.start]          # 树节点列表，初始化时只包含起点
         self.search_radius = search_radius     # 搜索邻近节点的半径
-        self.R_crash = R_crash   # 本体碰撞半径
-        self.R_risk = R_risk     # 本体风险半径
+        self.R_crash = R_crash                 # 本体碰撞半径
+        self.R_risk = R_risk                   # 本体风险半径
         self.search_until_max_iter = search_until_max_iter  # 是否持续搜索直到最大迭代次数
 
     def planning(self):
@@ -515,9 +515,9 @@ if __name__ == '__main__':
                 R_risk=r_agent_risk, 
                 obstacle_list=obstacle_list, 
                 rand_area=[0, env_map["size"], env_map["z_size"]], 
-                expand_dis=30,    # 步长
+                expand_dis=100,    # 步长
                 max_iter=1000,    # 迭代次数
-                search_radius=60.0
+                search_radius=120.0
             )
             start_time = time.time()
             time_first, iteration_find_path, first_path, final_best_path = rrt_star.planning()
