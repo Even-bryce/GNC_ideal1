@@ -683,12 +683,16 @@ class RRTStar:
     #                 return True
     #     return False
     
-    def check_collision(self, node):
+    def check_collision(self, node, near_obstacle_list=None):
         """
         判断节点是否进入 crash 区。
         修正：加入 safety_margin，构建一个比视觉障碍物稍大的“隐形禁区”。
         """
-        for cx, cy, z_min, z_max, obs_R_crash, obs_R_risk in self.obstacle_list:
+
+        if near_obstacle_list is None:
+            near_obstacle_list = self.obstacle_list
+
+        for cx, cy, z_min, z_max, obs_R_crash, obs_R_risk in near_obstacle_list:
             
             # 判定半径 = 机体 + 障碍物 + 安全余量
             collision_radius = self.R_crash + obs_R_crash + self.safety_margin
@@ -775,6 +779,7 @@ class RRTStar:
         # 统计局部区域内的障碍物面积
         total_obs_area = 0.0
         obs_count_in_range = 0
+        near_obstacle_list = []
         
         for obs in self.obstacle_list:
             cx, cy, _, _, r_crash, _ = obs
@@ -783,12 +788,13 @@ class RRTStar:
             if d_sq <= search_radius_sq:
                 obs_count_in_range += 1
                 total_obs_area += math.pi * (r_crash + self.safety_margin)**2
+                near_obstacle_list.append(obs)
 
         # =========================================================
         # 2. 【极速剪枝】如果局部范围全是空的，直接放行
         # =========================================================
         # 这一步非常关键，它避免了空旷区域大量的无用计算
-        if obs_count_in_range == 0:
+        if obs_count_in_range == 0 or near_obstacle_list == []:
             return False
 
         # =========================================================
@@ -800,10 +806,10 @@ class RRTStar:
             density_ratio = total_obs_area / search_area
             
             # 密度映射策略
-            if density_ratio > 0.5:   # 密集区
-                step_size = 0.2       # 高精度
-            elif density_ratio > 0.3: # 中等区
-                step_size = 0.6
+            if density_ratio > 0.8:   # 密集区
+                step_size = 0.1       # 高精度
+            elif density_ratio > 0.4: # 中等区
+                step_size = self.R_crash / 2.0
             else:                     # 稀疏区
                 step_size = 3       # 低精度快速通过
 
@@ -820,12 +826,12 @@ class RRTStar:
             cy = n1.y + dy * step_size * i
             cz = n1.z + dz * step_size * i
             
-            # 直接调用你现有的单点检测函数
-            if self.check_collision(Node(cx, cy, cz)):
+            # 调用优化后的单点检测函数
+            if self.check_collision(Node(cx, cy, cz), near_obstacle_list=near_obstacle_list):
                 return True
         
-        # 别忘了检查终点
-        if self.check_collision(n2):
+        # 检查终点
+        if self.check_collision(n2, near_obstacle_list=near_obstacle_list):
             return True
             
         return False
