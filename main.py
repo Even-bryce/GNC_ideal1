@@ -71,13 +71,13 @@ class RRTStar:
             # ===== 1. 未找到路径前使用 Bi-RRT 采样 =====
             if not self.first_path_found:      
                 rnd = self.sample_goal(20, tree2[0])
-                rnd_node = Node(rnd[0], rnd[1], rnd[2])
+                
 
                 # ===== 2. 在当前树中扩展 =====
                 nearest_ind = self.get_nearest_node_index(tree1, rnd)
                 nearest_node = tree1[nearest_ind]
 
-                steer_node = self.steer(nearest_node, rnd_node)
+                steer_node = self.steer(nearest_node, rnd)
                 new_node = self.apf_steer(steer_node, tree2[0])
 
                 if not self.check_collision(new_node) and not self.check_edge_collision(nearest_node, new_node):
@@ -94,8 +94,7 @@ class RRTStar:
                     continue
 
                 # ===== 5. Bi-RRT：尝试连接另一棵树 =====
-                connect_ind = self.get_nearest_node_index(tree2,
-                                                        [new_node.x, new_node.y, new_node.z])
+                connect_ind = self.get_nearest_node_index(tree2, new_node)
                 connect_node = tree2[connect_ind]
 
                 if not self.check_edge_collision(new_node, connect_node):
@@ -137,6 +136,7 @@ class RRTStar:
                     print(f"[首次耗时] {end_time - start_time:.3f}s")
                     print(f"[首次路径长度] {self.calculate_path_length(first_path):.4f} 米")
                     self.first_path_found = True
+                    self.use_informed_sampling = True
                     self.c_best = self.calculate_path_length(first_path)
                     if not self.search_until_max_iter:
                         return first_path
@@ -160,7 +160,7 @@ class RRTStar:
                 # 如果采样失败（比如椭圆太小），直接跳过本次循环，防止卡死
                 if rnd is None: 
                     continue
-                rnd_node = Node(rnd[0], rnd[1], rnd[2])
+                
 
                 # 由于合并后所有节点都在 merged_node_list 中，我们对它进行扩展
                 # 注意：为了保持一致性，建议统一把合并后的点都加到 node_list_start，或者直接用 merged_node_list
@@ -171,7 +171,7 @@ class RRTStar:
                 nearest_node = current_tree[nearest_ind]
 
                 # 3. 扩展 (Steer)
-                steer_node = self.steer(nearest_node, rnd_node)
+                steer_node = self.steer(nearest_node, rnd)
                 new_node = self.apf_steer(steer_node, self.goal) # 这里目标可以是 self.goal
 
                 # 4. 碰撞检测
@@ -230,7 +230,7 @@ class RRTStar:
         rnd = [rnd_gen.uniform(self.min_rand, self.max_rand),
                rnd_gen.uniform(self.min_rand, self.max_rand),
                rnd_gen.uniform(self.min_rand, self.z_rand)]
-        return rnd
+        return Node(rnd[0], rnd[1], rnd[2])
     
     def sample_goal(self, goal_sample_rate, target_node):
         """
@@ -241,16 +241,16 @@ class RRTStar:
         if random.randint(0, 99) > goal_sample_rate:
             return self.sample_free()
         else:
-            return [target_node.x, target_node.y, target_node.z]
+            return Node(target_node.x, target_node.y, target_node.z)
     
     def informed_sample(self):
         # 非 informed 时回默认
         if (not self.use_informed_sampling) or self.c_best == float("inf"):
-            return [
+            return Node(random.uniform(self.min_rand, self.max_rand),
                 random.uniform(self.min_rand, self.max_rand),
-                random.uniform(self.min_rand, self.max_rand),
-                random.uniform(self.min_rand, self.z_rand),
-            ]
+                random.uniform(self.min_rand, self.z_rand))
+                
+            
 
         # ------------------------------------------------------------------
         # 1. 计算椭球轴长
@@ -261,7 +261,7 @@ class RRTStar:
         delta = max(c_best**2 - c_min**2, 0.0)
         a1 = c_best / 2.0
         a2 = math.sqrt(delta) / 2.0
-        a3 = self.z_rand  # Z 方向不受限制
+        a3 = self.z_rand * 0.8  # Z 方向与地图大小有关，0.8 是经验值
 
         L = np.diag([a1, a2, a3])
 
@@ -312,7 +312,7 @@ class RRTStar:
         center = (start + goal) / 2.0
         sample = R @ (L @ p) + center
 
-        return sample.tolist()
+        return Node(sample[0], sample[1], sample[2])
     
     
 #---------------------------steer--------------------------   
@@ -409,34 +409,6 @@ class RRTStar:
         new_node.cost = from_node.cost + self.expand_dis + self.risk_cost(new_node)
         
         return new_node
-
-    def extend_star(self, tree_nodes, rnd):
-        # 1. 最近节点
-        nearest_ind = self.get_nearest_node_index(tree_nodes, rnd)
-        nearest_node = tree_nodes[nearest_ind]
-
-        # 2. steer / APF
-        steer_node = self.steer(nearest_node, Node(rnd[0], rnd[1], rnd[2]))
-        new_node = self.apf_steer(steer_node, self.goal)
-
-        # 3. 碰撞检测
-        if self.check_collision(new_node):
-            return None
-        if self.check_edge_collision(nearest_node, new_node):
-            return None
-
-        # 4. choose parent（局部最优）
-        near_inds = self.find_near_nodes(new_node)
-        new_node = self.choose_parent(new_node, near_inds) or new_node
-
-        # 5. rewire（RRT* 精髓）
-        self.rewire(new_node, near_inds)
-
-        # 6. 加入当前树
-        tree_nodes.append(new_node)
-
-        return new_node
-
     
 # ----------------------------rewire----------------------------
     # def choose_parent(self, new_node, near_inds):
@@ -560,10 +532,10 @@ class RRTStar:
         """
         找到树中距离随机点最近的节点的索引
         :param node_list: 当前树中的节点列表
-        :param rnd: 随机采样点的坐标 [x, y]
+        :param rnd: 随机采样节点
         :return: 最近节点的索引
         """
-        dlist = [(node.x - rnd[0]) ** 2 + (node.y - rnd[1]) ** 2 + (node.z - rnd[2]) ** 2 for node in node_list]
+        dlist = [(node.x - rnd.x) ** 2 + (node.y - rnd.y) ** 2 + (node.z - rnd.z) ** 2 for node in node_list]
         return dlist.index(min(dlist))
     
     def search_best_goal_node(self, tree, search_ratio=2):
