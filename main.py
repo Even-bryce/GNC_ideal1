@@ -53,6 +53,13 @@ class RRTStar:
         self.c_min = self.calc_dist_to_goal(self.start.x, self.start.y, self.start.z)
         self.use_informed_sampling = False     # 是否启用 Informed 采样
         self.safety_margin = safety_margin     # 碰撞检测安全阈值
+
+        # --- [新增] 预计算最大障碍物半径 ---
+        if self.obstacle_list:
+            # obstacle: [x, y, zmin, zmax, r_crash, r_risk]
+            self.max_obs_radius = max([obs[4] for obs in self.obstacle_list])
+        else:
+            self.max_obs_radius = 0.0
         
 
     def planning(self):
@@ -746,62 +753,51 @@ class RRTStar:
     #             return True
     #     return False
     
-    def check_edge_collision(self, n1, n2, step_size=None):
+    def check_edge_collision(self, n1, n2, step_size=0.5):
+        """
+        检查线段 n1->n2 是否碰撞。
+        优化策略：
+        1. 固定步长 0.5m (平衡了精度与速度，比 0.2 快一倍，比 1.2 安全)
+        2. 三点预判 (中点检测)：先查中点，大概率能提前发现碰撞，避免进入循环
+        3. 移除全量密度计算，恢复 Early Exit 特性
+        """
         dist = self.calc_distance(n1, n2)
-        if step_size is None:
-            step_size = self.R_crash / 2.0
         if dist == 0: return False
 
-        # ----------------------------------------
-        # 1. 快速几何初筛 (加入 safety_margin)
-        # ----------------------------------------
-        for cx, cy, z_min, z_max, obs_R_crash, obs_R_risk in self.obstacle_list:
+        # ==========================================
+        # 1. 三点预判 (极大提升效率)
+        # ==========================================
+        # 在开始漫长的步进检测前，先检查 起点、终点、中点
+        # 如果这三个点撞了，直接返回，省去了中间几十次计算
+        if self.check_collision(n1) or self.check_collision(n2):
+            return True
             
-            # 计算包含安全余量的判定阈值
-            collision_threshold = self.R_crash + obs_R_crash + self.safety_margin
-            
-            # Z轴安全范围
-            obs_safe_z_min = z_min - self.R_crash - self.safety_margin
-            obs_safe_z_max = z_max + self.R_crash + self.safety_margin
-            
-            path_z_min = min(n1.z, n2.z)
-            path_z_max = max(n1.z, n2.z)
-            
-            # 如果高度完全错开，则绝对安全
-            if path_z_max < obs_safe_z_min or path_z_min > obs_safe_z_max:
-                continue
+        mid_node = Node((n1.x + n2.x)/2, (n1.y + n2.y)/2, (n1.z + n2.z)/2)
+        if self.check_collision(mid_node):
+            return True
 
-            # XY平面几何距离初筛
-            dist_to_center = self.point_to_line_distance_xy(cx, cy, n1.x, n1.y, n2.x, n2.y)
-            
-            # 如果离散点还没查，几何距离就已经小于阈值了，这非常危险
-            # 我们可以直接在这里做一次更加严格的判断，或者留给离散检测
-            # 为了防止漏检，如果几何距离已经极其接近（例如小于阈值的 80%），可以直接判死刑
-            if dist_to_center <= collision_threshold * 0.9: 
-                 # 这是一个激进的优化：如果圆心到线段的垂直距离已经很小了，
-                 # 且高度又有重叠，大概率是撞了。
-                 # 为了严谨，我们还是交给下面的离散检测，但离散检测必须使用上面的 collision_threshold
-                 pass
-
-        # ----------------------------------------
-        # 2. 离散检测 (复用 check_collision 即可)
-        # ----------------------------------------
-        # 因为 check_collision 已经加了 safety_margin，
-        # 所以这里的采样点会自动遵循更严格的标准
-        n_steps = int(dist / step_size) + 1
+        # ==========================================
+        # 2. 离散步进检测
+        # ==========================================
+        # 0.5m 的步长对于 R=1.2m 的无人机来说足够安全 (步长 < 半径)
+        # 只有在极端边缘切入时才可能漏检，但概率极低
+        n_steps = int(dist / step_size) 
+        
         dx = (n2.x - n1.x) / dist
         dy = (n2.y - n1.y) / dist
         dz = (n2.z - n1.z) / dist
 
-        for i in range(n_steps):
+        # 从 1 开始，到 n_steps-1 (因为起点、终点、中点都查过了)
+        # 也可以保留全查以防万一
+        for i in range(1, n_steps):
             cx = n1.x + dx * step_size * i
             cy = n1.y + dy * step_size * i
             cz = n1.z + dz * step_size * i
+            
+            # 这里调用原本的 check_collision
+            # 因为它有 Early Exit，所以一旦撞到就会立刻停止，比算密度快得多
             if self.check_collision(Node(cx, cy, cz)):
                 return True
-        
-        if self.check_collision(n2):
-            return True
             
         return False
     
@@ -975,7 +971,7 @@ if __name__ == '__main__':
             expand_dis=30,    # 步长
             max_iter=3000,    # 迭代次数
             search_radius=150, # 搜索半径
-            search_until_max_iter=True,  # 持续搜索以优化路径，保持常驻false，因为bi-rrt*利用剩余迭代次数优化不符合单RRT*的渐进最优性
+            search_until_max_iter=False,  # 持续搜索以优化路径，保持常驻false，因为bi-rrt*利用剩余迭代次数优化不符合单RRT*的渐进最优性
             safety_margin=0.5   # 安全边距
         )
         start_time = time.time()
