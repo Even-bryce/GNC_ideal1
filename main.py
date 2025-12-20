@@ -753,51 +753,80 @@ class RRTStar:
     #             return True
     #     return False
     
-    def check_edge_collision(self, n1, n2, step_size=0.5):
+    def check_edge_collision(self, n1, n2, step_size=None):
         """
         检查线段 n1->n2 是否碰撞。
-        优化策略：
-        1. 固定步长 0.5m (平衡了精度与速度，比 0.2 快一倍，比 1.2 安全)
-        2. 三点预判 (中点检测)：先查中点，大概率能提前发现碰撞，避免进入循环
-        3. 移除全量密度计算，恢复 Early Exit 特性
+        策略：局部筛选计算密度 -> 自适应步长 -> 调用 self.check_collision
         """
         dist = self.calc_distance(n1, n2)
         if dist == 0: return False
 
-        # ==========================================
-        # 1. 三点预判 (极大提升效率)
-        # ==========================================
-        # 在开始漫长的步进检测前，先检查 起点、终点、中点
-        # 如果这三个点撞了，直接返回，省去了中间几十次计算
-        if self.check_collision(n1) or self.check_collision(n2):
-            return True
-            
-        mid_node = Node((n1.x + n2.x)/2, (n1.y + n2.y)/2, (n1.z + n2.z)/2)
-        if self.check_collision(mid_node):
-            return True
-
-        # ==========================================
-        # 2. 离散步进检测
-        # ==========================================
-        # 0.5m 的步长对于 R=1.2m 的无人机来说足够安全 (步长 < 半径)
-        # 只有在极端边缘切入时才可能漏检，但概率极低
-        n_steps = int(dist / step_size) 
+        # =========================================================
+        # 1. 【局部筛选】为了计算密度和做早期剪枝
+        # =========================================================
+        mid_x = (n1.x + n2.x) / 2
+        mid_y = (n1.y + n2.y) / 2
         
+        # 搜索半径 = 线段一半 + 最大障碍物半径 + 安全余量
+        # 只要障碍物可能碰到线段，它的圆心一定在这个范围内
+        search_radius = (dist / 2.0) + self.max_obs_radius + self.safety_margin
+        search_radius_sq = search_radius ** 2
+
+        # 统计局部区域内的障碍物面积
+        total_obs_area = 0.0
+        obs_count_in_range = 0
+        
+        for obs in self.obstacle_list:
+            cx, cy, _, _, r_crash, _ = obs
+            d_sq = (cx - mid_x)**2 + (cy - mid_y)**2
+            
+            if d_sq <= search_radius_sq:
+                obs_count_in_range += 1
+                total_obs_area += math.pi * (r_crash + self.safety_margin)**2
+
+        # =========================================================
+        # 2. 【极速剪枝】如果局部范围全是空的，直接放行
+        # =========================================================
+        # 这一步非常关键，它避免了空旷区域大量的无用计算
+        if obs_count_in_range == 0:
+            return False
+
+        # =========================================================
+        # 3. 【自适应步长】由局部密度决定
+        # =========================================================
+        if step_size is None: 
+            # 搜索圆的总面积 (避免除0)
+            search_area = math.pi * search_radius_sq + 1e-6
+            density_ratio = total_obs_area / search_area
+            
+            # 密度映射策略
+            if density_ratio > 0.5:   # 密集区
+                step_size = 0.2       # 高精度
+            elif density_ratio > 0.3: # 中等区
+                step_size = 0.6
+            else:                     # 稀疏区
+                step_size = 3       # 低精度快速通过
+
+        # =========================================================
+        # 4. 【离散步进检测】调用标准接口 self.check_collision
+        # =========================================================
+        n_steps = int(dist / step_size) + 1
         dx = (n2.x - n1.x) / dist
         dy = (n2.y - n1.y) / dist
         dz = (n2.z - n1.z) / dist
 
-        # 从 1 开始，到 n_steps-1 (因为起点、终点、中点都查过了)
-        # 也可以保留全查以防万一
-        for i in range(1, n_steps):
+        for i in range(n_steps):
             cx = n1.x + dx * step_size * i
             cy = n1.y + dy * step_size * i
             cz = n1.z + dz * step_size * i
             
-            # 这里调用原本的 check_collision
-            # 因为它有 Early Exit，所以一旦撞到就会立刻停止，比算密度快得多
+            # 直接调用你现有的单点检测函数
             if self.check_collision(Node(cx, cy, cz)):
                 return True
+        
+        # 别忘了检查终点
+        if self.check_collision(n2):
+            return True
             
         return False
     
