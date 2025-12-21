@@ -764,6 +764,8 @@ class RRTStar:
         """
         dist = self.calc_distance(n1, n2)
         if dist == 0: return False
+        if self.check_collision(n2, near_obstacle_list=None):
+            return True
 
         # =========================================================
         # 1. 【局部筛选】为了计算密度和做早期剪枝
@@ -771,9 +773,9 @@ class RRTStar:
         mid_x = (n1.x + n2.x) / 2
         mid_y = (n1.y + n2.y) / 2
         
-        # 搜索半径 = 线段一半 + 最大障碍物半径 + 安全余量
+        # 搜索半径 = 线段一半 + 最大障碍物半径 + 安全余量 + 机体 crash 半径
         # 只要障碍物可能碰到线段，它的圆心一定在这个范围内
-        search_radius = (dist / 2.0) + self.max_obs_radius + self.safety_margin
+        search_radius = (dist / 2.0) + self.max_obs_radius + self.safety_margin + self.R_crash
         search_radius_sq = search_radius ** 2
 
         # 统计局部区域内的障碍物面积
@@ -808,10 +810,10 @@ class RRTStar:
             # 密度映射策略
             if density_ratio > 0.8:   # 密集区
                 step_size = 0.1       # 高精度
-            elif density_ratio > 0.4: # 中等区
-                step_size = self.R_crash / 2.0
+            elif density_ratio > 0.5: # 中等区
+                step_size = 0.2
             else:                     # 稀疏区
-                step_size = 3       # 低精度快速通过
+                step_size = self.R_crash / 2       # 低精度快速通过
 
         # =========================================================
         # 4. 【离散步进检测】调用标准接口 self.check_collision
@@ -1007,7 +1009,7 @@ if __name__ == '__main__':
             max_iter=3000,    # 迭代次数
             search_radius=150, # 搜索半径
             search_until_max_iter=False,  # 持续搜索以优化路径，保持常驻false，因为bi-rrt*利用剩余迭代次数优化不符合单RRT*的渐进最优性
-            safety_margin=0.5   # 安全边距
+            safety_margin=1.5   # 安全边距
         )
         start_time = time.time()
         path = planner.planning()
