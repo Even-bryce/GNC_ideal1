@@ -20,7 +20,7 @@ class Node:
 
 # 定义 RRTStar 类，用于实现 RRT* 算法
 class RRTStar:
-    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=30, max_iter=1500, search_radius=150, safety_margin=0.3, search_until_max_iter=True):
+    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=30, max_iter=1500, search_radius=150, safety_margin=0.3,  N_layers=3, search_until_max_iter=True):
         """
         初始化 RRT* 算法的参数
         :param start: 起点坐标 [x, y, z]
@@ -51,6 +51,7 @@ class RRTStar:
         self.first_path_found = False  # 是否已找到首条路径
         self.c_best = float("inf")             # 当前最佳路径成本
         self.c_min = self.calc_dist_to_goal(self.start.x, self.start.y, self.start.z)
+        self.N_layers = N_layers               # 向上溯源层数
         self.use_informed_sampling = False     # 是否启用 Informed 采样
         self.safety_margin = safety_margin     # 碰撞检测安全阈值
 
@@ -91,7 +92,7 @@ class RRTStar:
                     
                     # ===== 3. RRT*：choose parent =====
                     near_inds = self.find_near_nodes(new_node, tree1)
-                    new_node = self.choose_parent(new_node, near_inds, tree1)
+                    new_node = self.choose_parent(new_node, nearest_node, near_inds, tree1)
 
                     # ===== 4. RRT*：rewire =====
                     self.rewire(new_node, near_inds, tree1)
@@ -186,7 +187,7 @@ class RRTStar:
                     
                     # 5. Choose Parent (标准 RRT* 步骤)
                     near_inds = self.find_near_nodes(new_node, current_tree)
-                    new_node = self.choose_parent(new_node, near_inds, current_tree)
+                    new_node = self.choose_parent(new_node, nearest_node, near_inds, current_tree)
                     
                     # 6. Rewire (标准 RRT* 步骤 - 关键优化步骤)
                     self.rewire(new_node, near_inds, current_tree)
@@ -448,63 +449,79 @@ class RRTStar:
     #     new_node.parent = self.node_list[min_ind]
     #     return new_node
 
-    def choose_parent(self, new_node, near_inds, tree):
+    def get_candi_inds(self, near_inds, tree):
+        candi_inds = set(near_inds)  # 使用集合避免重复
         """
-        选择最佳父节点，不steer直接连接
+        获得near_inds向上N_layers层的所有节点
+        """
+        for i in near_inds:
+            current_node = tree[i]
+            # 向上追溯N层父节点
+            for _ in range(self.N_layers):
+                if current_node.parent is not None:
+                    # 找到父节点在node_list中的索引
+                    parent_index = self.find_node_index(current_node.parent, tree)
+                    if parent_index != -1:  # 确保父节点在node_list中
+                        candi_inds.add(parent_index)
+                        current_node = current_node.parent
+                    else:
+                        break
+                else:
+                    break
+        
+        candi_inds = list(candi_inds)  # 转换为列表
+        return candi_inds
+    
+    def choose_parent(self, new_node, nearest_node, near_inds, tree):
+        """
+        选择最佳父节点
         :param new_node: 新节点
         :param near_inds: 附近节点的索引
-        :return: 更新父节点后的新节点，而不是返回父节点
-        
+        :return: 更新后的新节点
         """
         if not near_inds:
             return new_node
+        
+        candi_inds = self.get_candi_inds(near_inds, tree)
+        
+        # 以nearest_node作为初始父节点
+        min_node = nearest_node
+        min_cost = nearest_node.cost + self.calc_distance(nearest_node, new_node)
 
-        costs = []
-        for i in near_inds:
+        for i in candi_inds:
             near_node = tree[i]
-            if  not self.check_edge_collision(near_node, new_node):
-                costs.append(near_node.cost + self.calc_distance(near_node, new_node) + self.risk_cost(new_node))
-            else:
-                costs.append(float("inf"))  # 碰撞或无法连接
+            # 计算“起点——临近节点——新节点”的路径成本
+            new_cost = near_node.cost + self.calc_distance(new_node, near_node) + self.risk_cost(new_node)
+            
+            # 路径成本减少，则进行碰撞检测
+            if new_cost < min_cost:
+                if not self.check_edge_collision(new_node, near_node):
+                    min_node = near_node
+                    min_cost = new_cost
 
-        min_cost = min(costs)
-        if min_cost == float("inf"):
-            return new_node
-
-        min_ind = near_inds[costs.index(min_cost)]
-        # new node不变化，直接连接
         new_node.cost = min_cost
-        new_node.parent = tree[min_ind]
-        return new_node     
+        new_node.parent = min_node
+        return new_node
+    
 
     def rewire(self, new_node, near_inds, tree):
-        
-
-        for i in near_inds:
+        """
+        重新连接邻近节点以优化路径
+        :param new_node: 新节点
+        :param near_inds: 附近节点的索引
+        """
+        candi_inds = self.get_candi_inds(near_inds, tree)
+        for i in candi_inds:
             near_node = tree[i]
             
-            
-            # 不生成新点，而是计算“如果直连”的距离
+            # 计算“起点——新节点——临近节点”的路径成本
             dist_to_edge = self.calc_distance(new_node, near_node)
-
-            # 计算新路径的 Cost
             new_cost = new_node.cost + dist_to_edge + self.risk_cost(near_node)
 
-            # 只有 Cost 真的变小了，才做昂贵的碰撞检测
+            # 路径成本减少，则进行碰撞检测
             if new_cost < near_node.cost:
                 if not self.check_edge_collision(new_node, near_node):
-                    # 只更新关系，不动坐标！
-                    #print('check_rewire')
-
-                    # ==========================================
-                    # 【核心修复】 防止环路检测
-                    # 如果 near_node 已经是 new_node 的祖先，
-                    # 那么千万不能让 near_node 再认 new_node 做爹！
-                    # ==========================================
-                    # if self.is_ancestor(new_node, near_node):
-                    #     # print("避免了一次死循环 rewire！")
-                    #     continue
-
+                    # 更新节点关系
                     near_node.parent = new_node
                     near_node.cost = new_cost
                     self.propagate_cost_to_leaves(near_node, tree)
@@ -520,6 +537,17 @@ class RRTStar:
                 self.propagate_cost_to_leaves(node, tree)
         
         return
+    
+    def find_node_index(self, node, tree):
+        """
+        查找节点在node_list中的索引
+        :param node: 要查找的节点
+        :return: 节点的索引，如果找不到返回-1
+        """
+        for i, n in enumerate(tree):
+            if n == node:
+                return i
+        return -1
 
     def find_near_nodes(self, new_node, tree):
         """
@@ -1009,6 +1037,7 @@ if __name__ == '__main__':
             max_iter=3000,    # 迭代次数
             search_radius=150, # 搜索半径
             search_until_max_iter=False,  # 持续搜索以优化路径，保持常驻false，因为bi-rrt*利用剩余迭代次数优化不符合单RRT*的渐进最优性
+            N_layers=1,       # 选择父节点时向上追溯的层数
             safety_margin=1.5   # 安全边距
         )
         start_time = time.time()
