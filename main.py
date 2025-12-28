@@ -73,12 +73,16 @@ class RRTStar:
         tree1 = self.node_list_start
         tree2  = self.node_list_goal
         merged_tree = self.merged_node_list
+        
+        dtheta, theta0 = self.caculate_theta(tree1[0], tree2[0])
 
         for i in range(self.max_iter):
 
             # ===== 1. 未找到路径前使用 Bi-RRT 采样 =====
             if not self.first_path_found:      
-                rnd = self.sample_goal(20, tree2[0])
+                #rnd = self.sample_goal(20, tree2[0])
+                
+                rnd = self.sample_direction(tree1[0], tree2[0], goal_sample_rate=20, direction_sample_rate=25, dtheta=dtheta, theta0=theta0)
                 
 
                 # ===== 2. 在当前树中扩展 =====
@@ -250,6 +254,89 @@ class RRTStar:
             return self.sample_free()
         else:
             return Node(target_node.x, target_node.y, target_node.z)
+        
+
+    def caculate_theta(self, from_node, to_node):
+        # ===============================
+            # 1. 计算原始连线角度 θ0
+            # ===============================
+            dx = to_node.x - from_node.x
+            dy = to_node.y - from_node.y
+            theta0 = math.atan2(dy, dx)
+
+            # ===============================
+            # 2. 统计连线碰撞的障碍物
+            # ===============================
+            NL_obs = 0
+            SL_obs = 0.0
+
+            for obs in self.obstacle_list:
+                x, y, zmin, zmax, R_ob_crash, R_ob_risk = obs
+
+                if self.check_edge_collision(from_node, to_node, step_size=self.expand_dis/5):
+                    NL_obs += 1
+                    SL_obs += math.pi * R_ob_crash * R_ob_crash  # XY 投影面积
+
+            # ===============================
+            # 3. 全局障碍物统计
+            # ===============================
+            N_obs = len(self.obstacle_list)
+            if N_obs == 0:
+                # 没障碍物，退化成均匀采样
+                return self.sample_free()
+
+            S_obs = sum(
+                math.pi * obs[4] * obs[4]
+                for obs in self.obstacle_list
+            )
+
+            # ===============================
+            # 4. 计算风险比
+            # ===============================
+            R_L_n = (NL_obs + 1) / N_obs
+            R_L_s = SL_obs / S_obs if S_obs > 0 else 0.0
+
+            # ===============================
+            # 5. 偏转角 Δθ
+            # ===============================
+            delta_theta = (R_L_s / R_L_n) * math.exp(R_L_s)
+
+            # 可选：限制最大偏转角，防止发散
+            delta_theta = min(delta_theta, math.pi / 2)
+
+            
+            return delta_theta, theta0
+        
+    def sample_direction(self, from_node, to_node, goal_sample_rate, direction_sample_rate, dtheta, theta0):
+        """
+        基于 from_node -> to_node 连线的障碍物风险，自适应采样方向
+        x, y: 在 [θ0 - Δθ, θ0 + Δθ] 内采样
+        z: 全高度随机
+        """
+
+        if random.randint(0, 99) > goal_sample_rate and random.randint(0, 99) > direction_sample_rate:
+            return self.sample_free()
+        
+        elif random.randint(0, 99) > goal_sample_rate and random.randint(0, 99) <= direction_sample_rate:
+            # 构造采样点
+            theta = random.uniform(
+                theta0 - dtheta,
+                theta0 + dtheta
+            )
+            length =  random.uniform(0, self.max_rand)
+
+            x = from_node.x + length * math.cos(theta)
+            y = from_node.y + length * math.sin(theta)
+
+            z = random.uniform(0, self.z_rand)
+            return Node(x, y, z)
+        else:
+            return Node(to_node.x, to_node.y, to_node.z)
+        
+
+        
+
+
     
     def informed_sample(self):
         # 非 informed 时回默认
