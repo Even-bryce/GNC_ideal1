@@ -887,9 +887,9 @@ if __name__ == '__main__':
         straight_waypoints = find_straight_waypoint(
             path, 
             env_map, 
-            epsilon=2.0, 
+            epsilon=10, 
             check_step=0.5, 
-            safety_margin=2.0
+            safety_margin=1
         ) if path is not None else None
 
 
