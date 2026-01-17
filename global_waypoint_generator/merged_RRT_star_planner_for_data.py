@@ -4,9 +4,8 @@ import random
 import math
 import time
 from mpl_toolkits.mplot3d import Axes3D
-from env_generator import env_generator
-from res_show import plot_map, plot_tree_and_path
-from path_optimizer import PathOptimizer
+from env_generator_for_data import env_generator
+from res_show_for_data import plot_tree_and_path, plot_tree_and_path_and_waypoints
 
 # 定义 Node 类，用于表示树中的每个节点
 class Node:
@@ -19,6 +18,13 @@ class Node:
 
 
 # 定义 RRTStar 类，用于实现 RRT* 算法
+'''
+这个版本融合了rrt*相关成熟算法的机制，支持渐进最优性，包含：
+1. informed 采样
+2. 目标偏置采样
+3. apf引导扩展
+这个算法的成功率几乎是100%，初始路径的寻找也比较快，但是他的碰撞检测比较简单不鲁棒，且没有我们自己的创新机制，对于密集地图仍然存在穿模现象
+'''
 class RRTStar:
     def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=30, max_iter=1500, search_radius=150, search_until_max_iter=True):
         """
@@ -26,7 +32,7 @@ class RRTStar:
         :param start: 起点坐标 [x, y, z]
         :param goal: 目标坐标 [x, y, z]
         :param obstacle_list: 障碍物列表，每个障碍物为 [x, y, zmin, zmax, R_ob_crash, R_ob_risk]
-        :param rand_area: 随机采样区域的范围 [min, max]
+        :param rand_area: 随机采样区域的范围 [min, max], 大小为2*3的列表
         :param expand_dis: 树扩展的步长
         :param max_iter: 最大迭代次数
         :param search_radius: 搜索邻近节点的半径
@@ -35,9 +41,9 @@ class RRTStar:
         """
         self.start = Node(start[0], start[1], start[2])  # 创建起点节点
         self.goal = Node(goal[0], goal[1], goal[2])     # 创建目标节点
-        self.min_rand = rand_area[0]           # 随机采样区域的最小值
+        self.min_rand = rand_area[0]          # 随机采样区域的最小值
         self.max_rand = rand_area[1]           # 随机采样区域的最大值
-        self.z_rand = rand_area[2]          # 随机采样区域的最大z值
+       
         self.expand_dis = expand_dis           # 每次扩展的步长
         self.max_iter = max_iter               # 最大迭代次数
         self.obstacle_list = obstacle_list     # 存储障碍物列表
@@ -159,9 +165,9 @@ class RRTStar:
         :return: 随机点的坐标 [x, y, z]
         """
         rnd_gen = random.Random()
-        rnd = [rnd_gen.uniform(self.min_rand, self.max_rand),
-               rnd_gen.uniform(self.min_rand, self.max_rand),
-               rnd_gen.uniform(self.min_rand, self.z_rand)]
+        rnd = [rnd_gen.uniform(self.min_rand[0], self.max_rand[0]),
+               rnd_gen.uniform(self.min_rand[1], self.max_rand[1]),
+               rnd_gen.uniform(self.min_rand[2], self.max_rand[2])]
         return rnd
     
     def sample_goal(self, goal_sample_rate):
@@ -180,9 +186,9 @@ class RRTStar:
         # 非 informed 时回默认
         if (not self.use_informed_sampling) or self.c_best == float("inf"):
             return [
-                random.uniform(self.min_rand, self.max_rand),
-                random.uniform(self.min_rand, self.max_rand),
-                random.uniform(self.min_rand, self.z_rand),
+                random.uniform(self.min_rand[0], self.max_rand[0]),
+                random.uniform(self.min_rand[1], self.max_rand[1]),
+                random.uniform(self.min_rand[2], self.max_rand[2]),
             ]
 
         # ------------------------------------------------------------------
@@ -194,7 +200,7 @@ class RRTStar:
         delta = max(c_best**2 - c_min**2, 0.0)
         a1 = c_best / 2.0
         a2 = math.sqrt(delta) / 2.0
-        a3 = self.z_rand  # Z 方向不受限制
+        a3 = self.max_rand[2]  # Z 方向不受限制
 
         L = np.diag([a1, a2, a3])
 
@@ -648,9 +654,15 @@ def check_point_validity(x, y, z, obstacle_list):
                 return False
     return True
 
-def generate_valid_tasks(num_tasks, env_map, seed=None):
+def generate_valid_tasks(num_tasks, env_map, min_dist=200.0, seed=None):
     """
     生成 valid 的 (start, goal) 对
+
+    参数:
+        num_tasks : 需要生成的任务数量
+        env_map   : 地图信息
+        min_dist  : 起点与终点的最小距离阈值 (m)
+        seed      : 随机种子
     """
     if seed is not None:
         random.seed(seed)
@@ -658,32 +670,166 @@ def generate_valid_tasks(num_tasks, env_map, seed=None):
     
     tasks = []
     obs_list = env_map["obstacles"]
-    map_size = env_map["size"]
-    z_size = env_map["z_size"]
+    x_size = env_map["map_dim"][0]
+    y_size = env_map["map_dim"][1]
+    z_size = env_map["map_dim"][2]
+   
     
-    count = 0
     while len(tasks) < num_tasks:
-        # 生成 Start
-        sx = random.uniform(0, map_size)
-        sy = random.uniform(0, map_size)
-        sz = random.uniform(0, z_size) # 可以在空中
-        
-        # 生成 Goal
-        gx = random.uniform(0, map_size)
-        gy = random.uniform(0, map_size)
+        # ===== 生成 Start =====
+        sx = random.uniform(0, x_size)
+        sy = random.uniform(0, y_size)
+        sz = random.uniform(0, z_size)
+
+        # ===== 生成 Goal =====
+        gx = random.uniform(0, x_size)
+        gy = random.uniform(0, y_size)
         gz = random.uniform(0, z_size)
 
-        # 检查有效性
-        if check_point_validity(sx, sy, sz, obs_list) and \
-           check_point_validity(gx, gy, gz, obs_list):
-            
-            # 可选：确保起点终点不要太近 (例如 > 200m)
-            if math.sqrt((sx-gx)**2 + (sy-gy)**2 + (sz-gz)**2) > 200:
-                tasks.append(([sx, sy, sz], [gx, gy, gz]))
-                count += 1
-                # print(f"生成的第 {count} 个任务: Start -> Goal")
-    
+        # ===== 有效性检查 =====
+        if not check_point_validity(sx, sy, sz, obs_list):
+            continue
+        if not check_point_validity(gx, gy, gz, obs_list):
+            continue
+
+        # ===== 起终点距离约束 =====
+        dist = math.sqrt(
+            (sx - gx) ** 2 +
+            (sy - gy) ** 2 +
+            (sz - gz) ** 2
+        )
+
+        if dist < min_dist:
+            continue
+
+        tasks.append(([sx, sy, sz], [gx, gy, gz]))
+
     return tasks
+
+def find_straight_waypoint(ori_path, env_map, epsilon=2.0, check_step=0.5, safety_margin=2.0):
+    """
+    输入:
+        ori_path: 原始路径点序列, shape [N, 3]
+        env_map:  环境地图数据 (map_dict)
+        epsilon:  DP 算法阈值 (米)，建议设为 0.5 ~ 5.0，越小越精细，越大越稀疏
+        check_step: 碰撞检测步长 (米)
+        safety_margin: 安全余量 (米)，通常设为无人机半径或稍微大一点
+    
+    输出:
+        straight_waypoints: list [[x,y,z], ...]
+    """
+    
+    # 转换为 numpy array
+    path = np.array(ori_path)
+    if len(path) < 3:
+        return path.tolist()
+
+    # ==========================================
+    # 0. 内部定义碰撞检测函数 (闭包)
+    # ==========================================
+    def is_line_collision_free(p1, p2, step_size, margin):
+        """
+        内部辅助函数：检测 p1-p2 连线是否安全
+        直接使用外层的 env_map，不需要重复传参
+        """
+        obstacles = np.array(env_map['obstacles'])
+        if len(obstacles) == 0: return True
+            
+        # 1. 提取障碍物信息
+        obs_x = obstacles[:, 0]
+        obs_y = obstacles[:, 1]
+        obs_zmin = obstacles[:, 2]
+        obs_zmax = obstacles[:, 3]
+        # 核心：碰撞半径 = 物理半径 + 安全余量
+        obs_r_squared = (obstacles[:, 4] + margin) ** 2 
+        
+        # 2. 线段采样
+        dist = np.linalg.norm(p2 - p1)
+        if dist < 1e-6: return True
+        
+        n_steps = int(np.ceil(dist / step_size))
+        t = np.linspace(0, 1, n_steps + 1)
+        # [N_samples, 3]
+        sample_points = p1 + np.outer(t, p2 - p1)
+        
+        # 3. 向量化检测
+        sp_x = sample_points[:, 0:1] # [N, 1]
+        sp_y = sample_points[:, 1:2]
+        sp_z = sample_points[:, 2:3]
+        
+        # 广播对比: [N, 1] vs [M] (NumPy会自动广播为 [N, M])
+        # 条件A: 高度碰撞
+        collision_z = (sp_z >= obs_zmin) & (sp_z <= obs_zmax)
+        
+        # 条件B: 平面距离碰撞
+        dist_sq = (sp_x - obs_x)**2 + (sp_y - obs_y)**2
+        collision_xy = dist_sq <= obs_r_squared
+        
+        # 综合判定
+        is_collided = np.any(collision_z & collision_xy)
+        
+        return not is_collided
+
+    # ==========================================
+    # 1. 贪婪视线剪枝 (Greedy LoS Pruning)
+    # ==========================================
+    pruned_path = [path[0]]
+    current_idx = 0
+    n_points = len(path)
+    
+    while current_idx < n_points - 1:
+        found_next = False
+        # 倒序查找最远的可见点
+        for i in range(n_points - 1, current_idx, -1):
+            # 这里的 check_step 和 safety_margin 使用了外层传入的参数
+            if is_line_collision_free(path[current_idx], path[i], check_step, safety_margin):
+                pruned_path.append(path[i])
+                current_idx = i
+                found_next = True
+                break
+        
+        if not found_next:
+            current_idx += 1
+            pruned_path.append(path[current_idx])
+            
+    pruned_path = np.array(pruned_path)
+
+    # ==========================================
+    # 2. Douglas-Peucker (DP) 抽稀
+    # ==========================================
+    def point_line_distance(point, start, end):
+        if np.all(start == end):
+            return np.linalg.norm(point - start)
+        line_vec = end - start
+        point_vec = point - start
+        cross_prod = np.cross(line_vec, point_vec)
+        return np.linalg.norm(cross_prod) / np.linalg.norm(line_vec)
+
+    def douglas_peucker(points, eps):
+        if len(points) < 3: return points
+        dmax = 0.0
+        index = 0
+        end = len(points) - 1
+        
+        # 寻找最远点
+        # 优化：使用向量化计算点到直线距离可以更快，但循环写着简单，对于几百个点足够快
+        for i in range(1, end):
+            d = point_line_distance(points[i], points[0], points[end])
+            if d > dmax:
+                index = i
+                dmax = d
+        
+        if dmax > eps:
+            res1 = douglas_peucker(points[:index+1], eps)
+            res2 = douglas_peucker(points[index:], eps)
+            return np.vstack((res1[:-1], res2))
+        else:
+            return np.vstack((points[0], points[end]))
+
+    final_waypoints = douglas_peucker(pruned_path, epsilon)
+    
+    return final_waypoints.tolist()
+
 
 
 
@@ -695,11 +841,10 @@ if __name__ == '__main__':
     print("正在生成地图...")
     env_map = env_generator(
         rho=0.8, 
-        map_size=1500,
+        map_dim=(1500, 1500, 240),
         r_crash_range=(30, 50),
         r_risk_range=(3, 7),
         zmax_range=(30, 240),
-        z_size=240,
         max_iter=5000,
         seed=39
     )
@@ -707,9 +852,9 @@ if __name__ == '__main__':
     print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。")
 
     
-    tasks = [([0,0,0],[1500.0, 1500.0, 50.0]),([0, 1500.0, 0],[1500.0, 0, 150.0])] #手动选择的起终点
+    # tasks = [([0,0,0],[1500.0, 1500.0, 50.0]),([0, 1500.0, 0],[1500.0, 0, 150.0])] #手动选择的起终点
 
-    #tasks = generate_valid_tasks(5, env_map, seed=39)
+    tasks = generate_valid_tasks(5, env_map, min_dist=1500, seed=39)
     
     # 3. 运行测试
     success_times = []
@@ -730,14 +875,24 @@ if __name__ == '__main__':
             R_crash=r_agent_crash, 
             R_risk=r_agent_risk, 
             obstacle_list=obstacle_list, 
-            rand_area=[0, env_map["size"], env_map["z_size"]], 
+            rand_area=[[0, 0, 0],[env_map["map_dim"][0], env_map["map_dim"][1], env_map["map_dim"][2]]],
             expand_dis=30,    # 步长
             max_iter=3000,    # 迭代次数
             search_radius=150, # 搜索半径
-            search_until_max_iter=False  # 持续搜索以优化路径
+            search_until_max_iter=True  # 持续搜索以优化路径
         )
         start_time = time.time()
         path = planner.planning()
+
+        straight_waypoints = find_straight_waypoint(
+            path, 
+            env_map, 
+            epsilon=2.0, 
+            check_step=0.5, 
+            safety_margin=2.0
+        ) if path is not None else None
+
+
         
         end_time = time.time()
         
@@ -748,20 +903,10 @@ if __name__ == '__main__':
             success_times.append(elapsed)
             path_lengths.append(plen)
             print(f"{i+1:<10} | {'Success':<10} | {elapsed:<10.4f} | {plen:<10.4f}")
-            plot_tree_and_path(env_map, planner.node_list, path)
-            # # 优化路径
-            # opt = PathOptimizer(env_map, safety_margin=0.5)
+            plot_tree_and_path_and_waypoints(env_map, planner.node_list, path, straight_waypoints)
+           
 
-            # # 第一步：把折线拉直
-            # path_pruned = opt.pruning_optimizer(path)
-
-            # # 第二步：把直角磨圆（带自动防碰撞修正）
-            # final_path_points = opt.smooth_optimizer(path_pruned)
-            # plot_tree_and_path(env_map, planner.node_list, final_path_points)
-            # optimal_length = calculate_path_length(final_path_points)
-            # print(f"    优化后路径长度: {optimal_length:.4f} 米")
             
-
         else:
             print(f"{i+1:<10} | {'Failed':<10} | {elapsed:<10.4f} | {'N/A':<10}")
 

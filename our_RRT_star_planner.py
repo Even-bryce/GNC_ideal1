@@ -19,6 +19,20 @@ class Node:
 
 
 # 定义 RRTStar 类，用于实现 RRT* 算法
+'''
+这个才是我们的初步路径规划器版本，目前有的机制有：
+1. bi-rrt* 双树搜索
+2. informed 采样
+3. 目标偏置采样
+4. apf引导扩展
+5. 碰撞检测逻辑优化以及safety margin添加
+6. Q-RRT** 的 N 层父节点选择机制
+7. 局部地图的碰撞检测加速优化
+8. 树成环跳脱保护机制
+9. 优化利用后续迭代次数优化后寻找最优路径的逻辑
+
+这个算法有我们自己的创新，可以显著加速，但是存在穿模现象，且成功率大概是90%左右
+'''
 class RRTStar:
     def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=30, max_iter=1500, search_radius=150, safety_margin=0.3,  N_layers=3, search_until_max_iter=True):
         """
@@ -1096,9 +1110,9 @@ if __name__ == '__main__':
     print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。")
 
     
-    tasks = [([0,0,0],[1500.0, 1500.0, 50.0]),([0, 1500.0, 0],[1500.0, 0, 150.0])] #手动选择的起终点
+    # tasks = [([0,0,0],[1500.0, 1500.0, 50.0]),([0, 1500.0, 0],[1500.0, 0, 150.0])] #手动选择的起终点
 
-    #tasks = generate_valid_tasks(5, env_map, seed=39)
+    tasks = generate_valid_tasks(10, env_map, seed=42)
     
     # 3. 运行测试
     success_times = []
