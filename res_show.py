@@ -1,161 +1,183 @@
 import numpy as np
-import pyvista as pv
+from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.pyplot as plt
 
-def plot_map_pv(env_map):
+def plot_map(env_map):
+        """
+        绘制地图：
+        ① 3D 图 - 显示 r_crash 和 r_risk 的柱体
+        ② XY 俯视图 - 显示两个半径的圆形投影
+        """
+        obstacles = env_map["obstacles"]
+        map_size = env_map["size"]
+
+        fig = plt.figure(figsize=(14, 6))
+
+        # ==========================
+        # (1) ---- 3D 图 ----
+        # ==========================
+        ax1 = fig.add_subplot(121, projection='3d')
+
+        for obs in obstacles:
+            xc, yc, zmin, zmax, r_crash, r_risk = obs
+
+            theta = np.linspace(0, 2 * np.pi, 40)
+            z = np.linspace(zmin, zmax, 20)
+            theta_grid, z_grid = np.meshgrid(theta, z)
+
+            # 风险柱体（外层）
+            x_risk = xc + r_risk * np.cos(theta_grid)
+            y_risk = yc + r_risk * np.sin(theta_grid)
+            ax1.plot_surface(x_risk, y_risk, z_grid,
+                            color='gray', alpha=0.2, linewidth=0)
+
+            # 碰撞柱体（内层）
+            x_crash = xc + r_crash * np.cos(theta_grid)
+            y_crash = yc + r_crash * np.sin(theta_grid)
+            ax1.plot_surface(x_crash, y_crash, z_grid,
+                            color='gray', alpha=0.7, linewidth=0)
+
+        # 地图边界
+        bx = [0, map_size, map_size, 0, 0]
+        by = [0, 0, map_size, map_size, 0]
+        bz = [0, 0, 0, 0, 0]
+        ax1.plot(bx, by, bz, 'k-', linewidth=2)
+
+        ax1.set_xlim(0, map_size)
+        ax1.set_ylim(0, map_size)
+        max_z = max([obs[3] for obs in obstacles]) if obstacles else 200
+        ax1.set_zlim(0, max_z)
+
+        ax1.set_xlabel("X")
+        ax1.set_ylabel("Y")
+        ax1.set_zlabel("Z")
+        ax1.set_title("3D Cylindrical Obstacle Map")
+
+        # ==========================
+        # (2) ---- XY 俯视图 ----
+        # ==========================
+        ax2 = fig.add_subplot(122)
+        ax2.set_aspect('equal')
+
+        for obs in obstacles:
+            xc, yc, _, _, r_crash, r_risk = obs
+
+            # 风险区圆（外圈）
+            circle_risk = plt.Circle((xc, yc), r_risk,
+                                    color='gray', alpha=0.2, linewidth=1)
+            ax2.add_patch(circle_risk)
+
+            # 碰撞区圆（内圈）
+            circle_crash = plt.Circle((xc, yc), r_crash,
+                                    color='gray', alpha=0.7, linewidth=1)
+            ax2.add_patch(circle_crash)
+
+        # 地图边界
+        ax2.plot(bx, by, 'k-', linewidth=2)
+        ax2.set_xlim(0, map_size)
+        ax2.set_ylim(0, map_size)
+        ax2.set_xlabel("X")
+        ax2.set_ylabel("Y")
+        ax2.set_title("Top-Down View (XY Projection)")
+
+        plt.tight_layout()
+        plt.show()
+
+
+def plot_tree_and_path(env_map, node_list, path=None):
     """
-    使用 PyVista 绘制地图 (替代原来的 plot_map)
-    只显示环境障碍物，用于快速检查地图生成情况
-    """
-    plotter = pv.Plotter(window_size=[1200, 800])
-    plotter.set_background('white')
-    
-    _add_obstacles_to_plotter(plotter, env_map)
-    
-    # 添加地图边界框（新 API）
-    map_size = env_map["size"]
-    z_size = env_map["z_size"]
-    bounds = [0, map_size, 0, map_size, 0, z_size]
-
-    # ✔ PyVista 正确使用 show_grid，而不是 add_bounds_axes
-    plotter.add_axes()  # 这条命令画出三条从原点出发的坐标轴
-    plotter.show_grid(bounds=bounds, color='black')
-    
-    print("地图预览中... 关闭窗口以继续。")
-    plotter.show()
-
-def plot_tree_and_path_pv(env_map, node_list=None, path=None):
-    """
-    使用 PyVista 绘制 RRT 树和最终路径 (修复版)
-    修复内容：
-    1. 显式指定 lines 参数，解决 Empty mesh 报错
-    2. 强制转换 float 类型，消除 UserWarning
-    """
-    plotter = pv.Plotter(window_size=[1200, 800])
-    plotter.set_background('white')
-    
-    # 1. 绘制障碍物
-    _add_obstacles_to_plotter(plotter, env_map)
-
-    # 2. 绘制 RRT 树
-    if node_list is not None and len(node_list) > 1:
-        print(f"正在构建 RRT 树 ({len(node_list)} 个节点)...")
-        
-        line_segments = []
-        for node in node_list:
-            if node.parent:
-                p_start = [node.x, node.y, node.z]
-                p_end = [node.parent.x, node.parent.y, node.parent.z]
-                line_segments.append([p_start, p_end])
-        
-        if line_segments:
-            # === 修复 1: 强制转换为 float 类型，消除警告 ===
-            line_segments = np.array(line_segments).astype(float)
-            
-            # 构造 PolyData
-            n_lines = len(line_segments)
-            flat_points = line_segments.reshape(-1, 3)
-            
-            # 构造连接矩阵 [2, id1, id2, 2, id3, id4, ...]
-            # 2 表示每个单元有2个点（即线段）
-            padding = np.full((n_lines, 1), 2, dtype=int)
-            indices = np.arange(2 * n_lines).reshape(n_lines, 2)
-            cells = np.hstack((padding, indices)).flatten()
-            
-            # === 修复 2: 关键修改！必须使用 lines=cells ===
-            # 如果不写 lines=，PyVista 会以为这些是面(faces)，导致 tube 生成失败
-            tree_mesh = pv.PolyData(flat_points, lines=cells)
-            
-            # 管线化
-            tree_tubes = tree_mesh.tube(radius=0.2) # 半径可以根据需要调整
-            
-            plotter.add_mesh(tree_tubes, color='lime', opacity=0.5, label='RRT Tree')
-
-    # 3. 绘制最终路径
-    if path is not None:
-        path_arr = np.array(path).astype(float) # 同样转为 float
-        if len(path_arr) > 1:
-            spline = pv.lines_from_points(path_arr)
-            tube = spline.tube(radius=0.8) 
-            plotter.add_mesh(tube, color='red', label='Final Path')
-            
-            plotter.add_mesh(pv.Sphere(radius=2, center=path_arr[0]), color='blue', label='Start')
-            plotter.add_mesh(pv.Sphere(radius=2, center=path_arr[-1]), color='orange', label='Goal')
-
-    plotter.add_axes()
-    # -----------------------------------------------------------
-    map_size = env_map["size"]      # 例如 1500
-    z_size = env_map["z_size"]      # 例如 300
-    
-    # 定义边界：[x_min, x_max, y_min, y_max, z_min, z_max]
-    bounds = [0, map_size, 0, map_size, 0, z_size]
-
-    # show_grid 负责显示刻度尺
-    # bounds 参数强制规定了刻度尺的范围，这样即使你的路径很短，
-    # 视角也会被拉大到整个 1500x1500 的地图范围
-    plotter.show_grid(bounds=bounds, color='black')
-    plotter.add_legend()
-    
-    print("3D 窗口已打开。")
-    plotter.show()
-
-def _add_obstacles_to_plotter(plotter, env_map):
-    """
-    辅助函数：将圆柱体添加到场景中
+    绘制最终结果树和路径 (包含圆柱体顶底盖)
     """
     obstacles = env_map["obstacles"]
+    map_size = env_map["size"]
     
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    # ----------------------------------------
+    # 1. 绘制障碍物 (侧面 + 顶底盖)
+    # ----------------------------------------
+    print("正在绘制环境 (含顶底盖)...")
+    
+    # --- A. 侧面网格 (Theta vs Z) ---
+    theta = np.linspace(0, 2 * np.pi, 30) # 角度分辨率
+    z_norm = np.linspace(0, 1, 2)         # 高度标准化 [0, 1]
+    theta_grid, z_grid_norm = np.meshgrid(theta, z_norm)
+    
+    # --- B. 盖子网格 (Radius vs Theta) ---
+    # 半径从 0 到 1，用于缩放
+    r_norm = np.linspace(0, 1, 2)
+    theta_grid_cap, r_grid_norm = np.meshgrid(theta, r_norm)
+
     for obs in obstacles:
         xc, yc, zmin, zmax, r_crash, r_risk = obs
         
-        height = zmax - zmin
-        if height <= 0: continue
-        z_center = zmin + height / 2.0
+        # =============================
+        # Part 1: 绘制 Crash 区域 (深色, 不透明)
+        # =============================
+        # 1.1 侧面
+        z_grid = z_grid_norm * (zmax - zmin) + zmin
+        x_crash = xc + r_crash * np.cos(theta_grid)
+        y_crash = yc + r_crash * np.sin(theta_grid)
+        ax.plot_surface(x_crash, y_crash, z_grid, color='#555555', alpha=0.8, linewidth=0)
         
-        # 1. 绘制 Crash 区域 (实心障碍物)
-        # 关键：Opacity=0.6，这样你能透过它看到内部的路径！
-        cyl_crash = pv.Cylinder(center=(xc, yc, z_center), direction=(0, 0, 1), 
-                                radius=r_crash, height=height, resolution=40)
-        plotter.add_mesh(cyl_crash, color='#555555', opacity=0.6) 
+        # 1.2 顶面 (Lid) & 底面 (Bottom)
+        # 计算盖子的 X, Y 坐标
+        x_cap = xc + (r_grid_norm * r_crash) * np.cos(theta_grid_cap)
+        y_cap = yc + (r_grid_norm * r_crash) * np.sin(theta_grid_cap)
         
-        # 2. 绘制 Risk 区域 (仅显示线框或极淡的颜色)
-        # 用线框模式显示风险区，干扰更小
-        cyl_risk = pv.Cylinder(center=(xc, yc, z_center), direction=(0, 0, 1), 
-                               radius=r_risk, height=height, resolution=40)
-        plotter.add_mesh(cyl_risk, color='orange', style='wireframe', opacity=0.2)
+        # 顶盖 Z=zmax
+        z_cap_top = np.full_like(x_cap, zmax)
+        ax.plot_surface(x_cap, y_cap, z_cap_top, color='#555555', alpha=0.8, linewidth=0)
+        
+        # 底盖 Z=zmin
+        z_cap_bottom = np.full_like(x_cap, zmin)
+        ax.plot_surface(x_cap, y_cap, z_cap_bottom, color='#555555', alpha=0.8, linewidth=0)
 
-# ==========================================
-# 兼容性接口：如果你不想改主程序的调用代码
-# 可以把原来的函数名指向新的 PyVista 版本
-# ==========================================
-plot_map = plot_map_pv
-plot_tree_and_path = plot_tree_and_path_pv
+        # =============================
+        # Part 2: 绘制 Risk 区域 (浅色, 透明)
+        # =============================
+        # 2.1 侧面
+        x_risk = xc + r_risk * np.cos(theta_grid)
+        y_risk = yc + r_risk * np.sin(theta_grid)
+        ax.plot_surface(x_risk, y_risk, z_grid, color='#CCCCCC', alpha=0.25, linewidth=0)
+        
+        # 2.2 顶面 & 底面
+        x_cap_risk = xc + (r_grid_norm * r_risk) * np.cos(theta_grid_cap)
+        y_cap_risk = yc + (r_grid_norm * r_risk) * np.sin(theta_grid_cap)
+        
+        # 顶盖
+        ax.plot_surface(x_cap_risk, y_cap_risk, z_cap_top, color='#CCCCCC', alpha=0.25, linewidth=0)
+        # 底盖
+        ax.plot_surface(x_cap_risk, y_cap_risk, z_cap_bottom, color='#CCCCCC', alpha=0.25, linewidth=0)
 
-if __name__ == "__main__":
-    # 测试代码
-    # 模拟一个简单的 Node 类
-    class Node:
-        def __init__(self, x, y, z, parent=None):
-            self.x, self.y, self.z = x, y, z
-            self.parent = parent
-
-    # 1. 生成测试数据
-    mock_env = {
-        "size": 100, "z_size": 100,
-        "obstacles": [
-            (50, 50, 0, 80, 10, 15), # 中间的柱子
-            (20, 80, 0, 50, 5, 10)
-        ]
-    }
+    # ----------------------------------------
+    # 2. 绘制树和路径 (保持不变)
+    # ----------------------------------------
+    print(f"正在绘制路径 (节点数: {len(node_list)})...")
     
-    # 模拟树
-    n1 = Node(10, 10, 10)
-    n2 = Node(30, 30, 30, n1)
-    n3 = Node(45, 45, 40, n2) # 撞向柱子
-    nodes = [n1, n2, n3]
-    
-    # 模拟路径 (穿过柱子演示效果)
-    path = [[10, 10, 10], [30, 30, 30], [45, 45, 40], [60, 60, 60]]
+    # 绘制树枝
+    for node in node_list:
+        if node.parent:
+            ax.plot([node.x, node.parent.x], [node.y, node.parent.y], [node.z, node.parent.z], 
+                    color='lime', linewidth=1, alpha=0.5)
 
-    # 2. 调用绘图
-    # plot_map_pv(mock_env)
-    plot_tree_and_path_pv(mock_env, nodes, path)
+    if path is not None:
+        path = np.array(path)
+        ax.plot(path[:, 0], path[:, 1], path[:, 2], color='red', linewidth=3, label='Final Path')
+        ax.scatter(path[0, 0], path[0, 1], path[0, 2], c='blue', s=100, marker='^', label='Start')
+        ax.scatter(path[-1, 0], path[-1, 1], path[-1, 2], c='orange', s=100, marker='*', label='Goal')
+
+    # 设置轴和视角
+    ax.set_xlim(0, map_size)
+    ax.set_ylim(0, map_size)
+    ax.set_zlim(0, env_map["z_size"])
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.set_zlabel("Z (m)")
+    ax.set_title("RRT* 3D Planning (Solid Cylinders)")
+    ax.legend()
+    
+    # 调整视角以获得更好的立体感
+    ax.view_init(elev=25, azim=-45)
+    plt.show()
