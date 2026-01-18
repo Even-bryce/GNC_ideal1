@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 import random
 import math
 import time
@@ -830,6 +831,24 @@ def find_straight_waypoint(ori_path, env_map, epsilon=2.0, check_step=0.5, safet
     
     return final_waypoints.tolist()
 
+def save_sample(
+    file_path,
+    X,          # [N, 6]
+    Y           # [N, 1]
+):
+    """
+    X: np.ndarray, shape [N, 6]
+    Y: np.ndarray, shape [N, 1]
+    """
+    assert X.ndim == 2 and X.shape[1] == 6
+    assert Y.ndim == 2 and Y.shape[1] == 1
+    assert X.shape[0] == Y.shape[0]
+
+    np.savez(
+        file_path,
+        points=X.astype(np.float32),   # [N, 6]
+        labels=Y.astype(np.float32)    # [N, 1]
+    )
 
 
 
