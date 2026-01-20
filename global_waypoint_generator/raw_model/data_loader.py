@@ -2,7 +2,6 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 
-
 class PathPointDataset(Dataset):
     def __init__(self, data_files):
         self.data_files = data_files
@@ -11,57 +10,59 @@ class PathPointDataset(Dataset):
         return len(self.data_files)
 
     def __getitem__(self, idx):
+        # 加载数据
         data = np.load(self.data_files[idx])
 
-        xyz = torch.from_numpy(data['xyz']).float()        # [N, 3]
-        feat = torch.from_numpy(data['feat']).float()      # [N, 3]  ← 你现在是 6=3+3
-        target = torch.from_numpy(data['target']).float()  # [N]
+        # 修正：对应 save_sample 的键名 'points' 和 'labels'
+        # points shape: [N, 6] (前3维是xyz，后3维是特征)
+        points = torch.from_numpy(data['points']).float() 
+        
+        # labels shape: [N, 1]
+        target = torch.from_numpy(data['labels']).float()
 
-        return xyz, feat, target
-
+        return points, target
 
 def collate_fn(batch):
     """
+    处理变长点云的 Padding
     返回:
-        points:  [B, N, 6]
-        targets: [B, N, 1]
+        points_batch:  [B, N_max, 6]
+        targets_batch: [B, N_max, 1]
     """
-    B = len(batch)
-    N_max = max(xyz.shape[0] for xyz, _, _ in batch)
+    # 获取当前 batch 中最大的点数 N_max
+    # batch[i][0] 是 points, batch[i][1] 是 target
+    N_max = max(item[0].shape[0] for item in batch)
 
     points_list = []
     targets_list = []
 
-    for xyz, feat, target in batch:
-        N = xyz.shape[0]
+    for points, target in batch:
+        N = points.shape[0]
         pad_n = N_max - N
 
-        xyz_pad = torch.cat(
-            [xyz, torch.zeros(pad_n, 3)], dim=0
-        )
-        feat_pad = torch.cat(
-            [feat, torch.zeros(pad_n, feat.shape[1])], dim=0
-        )
+        if pad_n > 0:
+            # Padding Points: [N, 6] -> [N_max, 6] (补0)
+            # 注意：最后3维特征补0不影响，前3维补0意味着原点，最好padding的点在mask里被忽略
+            # 但 PointNet++ 对零填充通常具有鲁棒性
+            points_pad = torch.cat([points, torch.zeros(pad_n, 6)], dim=0)
+            
+            # Padding Targets: [N, 1] -> [N_max, 1]
+            target_pad = torch.cat([target, torch.zeros(pad_n, 1)], dim=0)
+        else:
+            points_pad = points
+            target_pad = target
 
-        points = torch.cat([xyz_pad, feat_pad], dim=1)  # [N, 6]
-        points_list.append(points)
+        points_list.append(points_pad)
+        targets_list.append(target_pad)
 
-        targets_list.append(
-            torch.cat([target, torch.zeros(pad_n)], dim=0)
-        )
+    # 堆叠
+    points_batch = torch.stack(points_list)    # [B, N_max, 6]
+    targets_batch = torch.stack(targets_list)  # [B, N_max, 1]
 
-    points = torch.stack(points_list)          # [B, N, 6]
-    targets = torch.stack(targets_list).unsqueeze(-1)  # [B, N, 1]
+    return points_batch, targets_batch
 
-    return points, targets
-
-
-def build_dataloader(
-    data_files,
-    batch_size=8,
-    shuffle=True,
-    num_workers=4
-):
+def build_dataloader(data_files, batch_size=8, shuffle=True, num_workers=0):
+    # Windows下 num_workers 建议设为 0，Linux 可设为 4
     dataset = PathPointDataset(data_files)
 
     return DataLoader(

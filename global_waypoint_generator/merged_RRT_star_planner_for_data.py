@@ -832,111 +832,308 @@ def find_straight_waypoint(ori_path, env_map, epsilon=2.0, check_step=0.5, safet
     return final_waypoints.tolist()
 
 def save_sample(
+    env_map,
     file_path,
-    X,          # [N, 6]
-    Y           # [N, 1]
+    best_path,      # [K, 3] 真实最优路径的一系列点 (密集)
+    waypoints,      # [M, 3] 真实路径的关键航路点 (稀疏，包含起点和终点)
+    N_attempts=4096,
+    alpha=0.4,      # 路径基础分权重
+    sigma1=0.05,    # 路段宽度 (归一化后)
+    sigma2=0.02,    # 关键点精度 (归一化后)
+    eps=1e-8
 ):
     """
-    X: np.ndarray, shape [N, 6]
-    Y: np.ndarray, shape [N, 1]
+    生成并保存一个训练样本 (.npz)
+    
+    输入:
+        best_path: 用于计算 d_line (到路径线段的距离)
+        waypoints: 用于计算 d_point (到关键点的距离) 以及提取 Start/Goal
+        waypoints[0] 应为 Start, waypoints[-1] 应为 Goal
     """
-    assert X.ndim == 2 and X.shape[1] == 6
-    assert Y.ndim == 2 and Y.shape[1] == 1
-    assert X.shape[0] == Y.shape[0]
-
-    np.savez(
-        file_path,
-        points=X.astype(np.float32),   # [N, 6]
-        labels=Y.astype(np.float32)    # [N, 1]
-    )
-
-
-
-# ==========================================
-# 4. 主程序
-# ==========================================
-if __name__ == '__main__':
-    # 1. 生成地图
-    print("正在生成地图...")
-    env_map = env_generator(
-        rho=0.8, 
-        map_dim=(1500, 1500, 240),
-        r_crash_range=(30, 50),
-        r_risk_range=(3, 7),
-        zmax_range=(30, 240),
-        max_iter=5000,
-        seed=39
-    )
-    obstacle_list = env_map["obstacles"]
-    print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。")
-
     
-    # tasks = [([0,0,0],[1500.0, 1500.0, 50.0]),([0, 1500.0, 0],[1500.0, 0, 150.0])] #手动选择的起终点
+    # ==========================================
+    # 内部辅助函数
+    # ==========================================
+    def check_collision(point, obstacles):
+        px, py, pz = point
+        for (ox, oy, zmin, zmax, r_crash, _) in obstacles:
+            if zmin <= pz <= zmax:
+                if (px - ox)**2 + (py - oy)**2 <= r_crash**2:
+                    return True
+        return False
 
-    tasks = generate_valid_tasks(5, env_map, min_dist=1500, seed=39)
-    
-    # 3. 运行测试
-    success_times = []
-    path_lengths = []
-    
-    # 设定 RRT* 参数 (Agent 自身尺寸设为 1.2m)
-    r_agent_crash = 1.2
-    r_agent_risk = 1.7
-    
-    print(f"{'Task ID':<10} | {'Status':<10} | {'Time (s)':<10} | {'Length (m)':<10}")
-    print("-" * 50)
-
-    for i, (start, goal) in enumerate(tasks):
-        # 初始化 RRT*
-        planner = RRTStar(
-            start=start, 
-            goal=goal, 
-            R_crash=r_agent_crash, 
-            R_risk=r_agent_risk, 
-            obstacle_list=obstacle_list, 
-            rand_area=[[0, 0, 0],[env_map["map_dim"][0], env_map["map_dim"][1], env_map["map_dim"][2]]],
-            expand_dis=30,    # 步长
-            max_iter=3000,    # 迭代次数
-            search_radius=150, # 搜索半径
-            search_until_max_iter=True  # 持续搜索以优化路径
-        )
-        start_time = time.time()
-        path = planner.planning()
-
-        straight_waypoints = find_straight_waypoint(
-            path, 
-            env_map, 
-            epsilon=10, 
-            check_step=0.5, 
-            safety_margin=1
-        ) if path is not None else None
-
-
-        
-        end_time = time.time()
-        
-        elapsed = end_time - start_time
-        
-        if path is not None:
-            plen = planner.calculate_path_length(path)
-            success_times.append(elapsed)
-            path_lengths.append(plen)
-            print(f"{i+1:<10} | {'Success':<10} | {elapsed:<10.4f} | {plen:<10.4f}")
-            plot_tree_and_path_and_waypoints(env_map, planner.node_list, path, straight_waypoints)
-           
-
+    def get_min_distance_to_obstacles(point, obstacles):
+        px, py, pz = point
+        min_dist = float('inf')
+        for (ox, oy, zmin, zmax, r_crash, _) in obstacles:
+            d_hor = np.sqrt((px - ox)**2 + (py - oy)**2) - r_crash
             
-        else:
-            print(f"{i+1:<10} | {'Failed':<10} | {elapsed:<10.4f} | {'N/A':<10}")
+            if pz > zmax: d_ver = pz - zmax
+            elif pz < zmin: d_ver = zmin - pz
+            else: d_ver = 0.0
 
-    # 4. 计算平均值
-    print("-" * 50)
-    if success_times:
-        avg_time = sum(success_times) / len(success_times)
-        avg_len = sum(path_lengths) / len(path_lengths)
-        print(f"测试完成。")
-        print(f"成功率: {len(success_times)/len(tasks)*100:.2f}% ")
-        print(f"平均运行时间: {avg_time:.4f} 秒")
-        print(f"平均路径长度: {avg_len:.4f} 米")
+            if d_hor > 0 and d_ver == 0: dist = d_hor
+            elif d_hor <= 0 and d_ver > 0: dist = d_ver
+            elif d_hor > 0 and d_ver > 0: dist = np.sqrt(d_hor**2 + d_ver**2)
+            else: dist = 0.0 
+            
+            if dist < min_dist: min_dist = dist
+        return min_dist
+
+    def point_to_segment_distance(P, A, B):
+        """
+        计算点 P 到线段 AB 的最短距离 (向量化实现)
+        P: [N, 3], A: [3], B: [3]
+        """
+        AB = B - A
+        AP = P - A
+        
+        # 投影系数 t = (AP . AB) / (AB . AB)
+        ab_sq = np.dot(AB, AB) + eps
+        t = np.dot(AP, AB) / ab_sq
+        
+        # 限制 t 在 [0, 1] 之间（线段内）
+        t = np.clip(t, 0.0, 1.0)
+        
+        # 投影点
+        Proj = A + t[:, np.newaxis] * AB
+        
+        # 距离
+        return np.linalg.norm(P - Proj, axis=1)
+
+    # ==========================================
+    # 1. 预处理输入数据
+    # ==========================================
+    path_arr = np.asarray(best_path, dtype=np.float32)   # [K, 3]
+    wp_arr   = np.asarray(waypoints, dtype=np.float32)   # [M, 3]
+    
+    # 提取起点和终点用于特征编码 (假设 waypoints 包含 S 和 G)
+    S = wp_arr[0]
+    G = wp_arr[-1]
+    
+    Lx, Ly, Lz = env_map["map_dim"]
+    xyz_min = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    xyz_max = np.array([Lx, Ly, Lz], dtype=np.float32)
+    obstacles = env_map["obstacles"]
+    
+    center = 0.5 * (xyz_min + xyz_max)
+    scale = max(Lx, Ly, Lz)
+
+    # ==========================================
+    # 2. 批量采样 (One-Pass)
+    # ==========================================
+    candidates = np.random.uniform(xyz_min, xyz_max, size=(N_attempts, 3))
+    valid_pts = []
+    
+    for p in candidates:
+        if not check_collision(p, obstacles):
+            valid_pts.append(p)
+
+    if len(valid_pts) == 0:
+        # 极端情况处理：如果没采到点，至少保留 waypoints
+        pts = wp_arr.copy()
     else:
-        print("所有任务均失败，请调整参数（如增加 max_iter 或减小 expand_dis）。")
+        pts = np.asarray(valid_pts, dtype=np.float32)
+
+    # ==========================================
+    # 3. 组合最终点集 (包含 S, G 和采样点)
+    # ==========================================
+    # 也可以选择把所有 waypoints 都加进去，保证关键点一定被覆盖
+    # 这里保持原逻辑：只强制加 S 和 G，其他随机
+    xyz = np.vstack([S[None], G[None], pts]) 
+    N_real = xyz.shape[0]
+
+    # ==========================================
+    # 4. 构建输入特征 (Input Features)
+    # ==========================================
+    # 坐标归一化
+    xyz_norm = (xyz - center) / (scale + eps)
+    
+    # 障碍物距离
+    d_obs = np.array([get_min_distance_to_obstacles(p, obstacles) for p in xyz], dtype=np.float32)
+    d_obs_norm = d_obs / (scale + eps)
+    
+    # 起终点相对距离场
+    d_s = np.linalg.norm(xyz - S[None], axis=1)
+    d_g = np.linalg.norm(xyz - G[None], axis=1)
+    denom = d_s + d_g + eps
+    f_start = d_g / denom
+    f_goal  = d_s / denom
+    
+    points = np.stack([
+        xyz_norm[:, 0], xyz_norm[:, 1], xyz_norm[:, 2],
+        d_obs_norm, f_start, f_goal
+    ], axis=1).astype(np.float32)
+
+    # ==========================================
+    # 5. 标签计算 (Label Generation) - 核心修改
+    # ==========================================
+    labels = np.zeros((N_real, 1), dtype=np.float32)
+    
+    # --- 计算 d_point (每个点到最近 waypoints 的距离) ---
+    # 使用广播机制计算所有采样点到所有 waypoints 的距离矩阵
+    # xyz: [N, 3], wp_arr: [M, 3]
+    # dists: [N, M]
+    dists_to_wps = np.linalg.norm(xyz[:, None, :] - wp_arr[None, :, :], axis=2)
+    d_point = np.min(dists_to_wps, axis=1) # [N,] 取最近的那个 waypoint 距离
+
+    # --- 计算 d_line (每个点到 best_path 多段线的最近距离) ---
+    d_line = np.full(N_real, float('inf'), dtype=np.float32)
+    
+    # 遍历 best_path 的每一段线段 (A -> B)
+    # 这种写法比计算 N*K 的矩阵更省内存，虽然是用循环，但内部是向量化的
+    for k in range(len(path_arr) - 1):
+        A = path_arr[k]
+        B = path_arr[k+1]
+        
+        # 计算所有点到当前线段 AB 的距离
+        d_segment = point_to_segment_distance(xyz, A, B)
+        
+        # 更新最小距离
+        d_line = np.minimum(d_line, d_segment)
+
+    # --- 标签混合公式 ---
+    # 归一化距离 (注意：sigma 是基于归一化尺度的，所以这里距离也要除以 scale)
+    d_line_norm = d_line / scale
+    d_point_norm = d_point / scale
+    
+    # Calculate terms
+    # Term 1: 路径基础分 (对应 alpha * exp(...))
+    y_line = alpha * np.exp(- (d_line_norm ** 2) / (2 * sigma1 ** 2))
+    
+    # Term 2: 航路点高分 (对应 1.0 * exp(...))
+    y_point = 1.0 * np.exp(- (d_point_norm ** 2) / (2 * sigma2 ** 2))
+    
+    # Max pooling
+    labels[:, 0] = np.maximum(y_line, y_point)
+
+    # 强制修正：起点和终点肯定是 1.0 (虽然公式也能算出1.0，但防止浮点误差)
+    labels[0, 0] = 1.0 
+    labels[1, 0] = 1.0
+
+    # ==========================================
+    # 6. 保存
+    # ==========================================
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    np.savez(file_path, points=points, labels=labels)
+    # print(f"Saved {file_path}, N={N_real}")
+    
+
+
+
+
+# 假设所有必要的函数 (env_generator, generate_valid_tasks, RRTStar, find_straight_waypoint, save_sample, plot_...) 都已经导入定义好了
+
+if __name__ == '__main__':
+    # ================= 配置区域 =================
+    NUM_MAPS = 10          # 地图数量
+    TASKS_PER_MAP = 200    # 每个地图的任务数
+    BASE_SEED = 39         # 基础随机种子
+    
+    # 保存路径 (使用 raw string r"..." 防止转义错误)
+    SAVE_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\raw_model\train_data"
+    
+    # RRT* 参数
+    R_AGENT_CRASH = 1.2
+    R_AGENT_RISK = 1.7
+    MAX_ITER = 3000
+    EXPAND_DIS = 30
+    SEARCH_RADIUS = 150
+    # ===========================================
+
+    # 确保保存目录存在
+    os.makedirs(SAVE_DIR, exist_ok=True)
+
+    print(f"开始生成数据: {NUM_MAPS} 个地图 x {TASKS_PER_MAP} 个任务 = {NUM_MAPS * TASKS_PER_MAP} 条数据")
+
+    # --- 外层循环：生成地图 ---
+    for map_id in range(NUM_MAPS):
+        current_seed = BASE_SEED + map_id  # 确保每个地图种子不同
+        
+        print(f"\n[{map_id+1}/{NUM_MAPS}] 正在生成第 {map_id} 号地图 (Seed={current_seed})...")
+        
+        # 1. 生成地图
+        env_map = env_generator(
+            rho=0.8, 
+            map_dim=(1500, 1500, 240),
+            r_crash_range=(30, 50),
+            r_risk_range=(3, 7),
+            zmax_range=(30, 240),
+            max_iter=5000,
+            seed=current_seed
+        )
+        obstacle_list = env_map["obstacles"]
+        print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。")
+
+        # 2. 生成该地图下的任务列表
+        # 注意：这里也传入 seed 保证可复现，或者您可以去掉 seed 让其完全随机
+        tasks = generate_valid_tasks(TASKS_PER_MAP, env_map, min_dist=1000, seed=current_seed) 
+        # 注意：我将 min_dist 改为了 1000，因为 1500*1500 的地图很难找到大量距离 >1500 的点对，容易卡死。如果您坚持要 1500 请改回。
+
+        # --- 内层循环：执行路径规划 ---
+        print(f"{'Task ID':<15} | {'Status':<10} | {'Time (s)':<10} | {'Length (m)':<10}")
+        print("-" * 55)
+
+        for task_id, (start, goal) in enumerate(tasks):
+            # 初始化 RRT*
+            planner = RRTStar(
+                start=start, 
+                goal=goal, 
+                R_crash=R_AGENT_CRASH, 
+                R_risk=R_AGENT_RISK, 
+                obstacle_list=obstacle_list, 
+                rand_area=[[0, 0, 0],[env_map["map_dim"][0], env_map["map_dim"][1], env_map["map_dim"][2]]],
+                expand_dis=EXPAND_DIS,
+                max_iter=MAX_ITER,
+                search_radius=SEARCH_RADIUS,
+                search_until_max_iter=True
+            )
+            
+            start_time = time.time()
+            path = planner.planning()
+            
+            # 计算平滑/关键点
+            straight_waypoints = None
+            if path is not None:
+                straight_waypoints = find_straight_waypoint(
+                    path, 
+                    env_map, 
+                    epsilon=10, 
+                    check_step=0.5, 
+                    safety_margin=1
+                )
+
+            end_time = time.time()
+            elapsed = end_time - start_time
+            
+            # 构造唯一文件名
+            # 格式: map0_task0.npz, map0_task1.npz ... map9_task199.npz
+            file_name = f"map{map_id}_task{task_id}.npz"
+            full_save_path = os.path.join(SAVE_DIR, file_name)
+
+            if path is not None and straight_waypoints is not None:
+                plen = planner.calculate_path_length(path)
+                
+                print(f"M{map_id}_T{task_id:<8} | {'Success':<10} | {elapsed:<10.4f} | {plen:<10.4f}")
+                
+                # --- 保存数据 ---
+                save_sample(
+                    env_map,
+                    file_path=full_save_path, # 传入完整路径
+                    best_path=path,
+                    waypoints=straight_waypoints,
+                    N_attempts=4096,
+                    alpha=0.4,
+                    sigma1=0.05,
+                    sigma2=0.02,
+                    eps=1e-8
+                )
+                
+                # --- ⚠️ 警告：批量生成时请注释掉绘图，否则会弹出2000个窗口或内存溢出 ---
+                # if task_id < 2: # 仅查看每个地图的前2个任务以检查效果
+                #     plot_tree_and_path_and_waypoints(env_map, planner.node_list, path, straight_waypoints)
+
+            else:
+                print(f"M{map_id}_T{task_id:<8} | {'Failed':<10} | {elapsed:<10.4f} | {'N/A':<10}")
+
+    print("\n所有数据生成任务结束！")

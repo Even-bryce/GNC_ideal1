@@ -34,20 +34,27 @@ class get_model(nn.Module):
         B, C, N = xyz.shape
         assert C == 6
 
-        l0_xyz = xyz[:, :3, :]      # [B, 3, N]
-        l0_points = xyz             # [B, 6, N]
+        # --- 修改点 1: 拆分坐标和特征 ---
+        l0_xyz = xyz[:, :3, :]      # [B, 3, N] -> 物理坐标 (x,y,z)
+        l0_features = xyz[:, 3:, :] # [B, 3, N] -> 额外特征 (dist, start, goal)
 
-        l1_xyz, l1_points = self.sa1(l0_xyz, l0_points)
+        # --- 修改点 2: SA1 只传 3 维特征 ---
+        # 内部逻辑: concat(l0_features, relative_xyz) = 3 + 3 = 6 维
+        # 正好匹配 self.sa1 定义的 in_channel=6
+        l1_xyz, l1_points = self.sa1(l0_xyz, l0_features)
+        
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
         l3_xyz, l3_points = self.sa3(l2_xyz, l2_points)
 
         l2_points = self.fp3(l2_xyz, l3_xyz, l2_points, l3_points)
         l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points)
 
+        # --- 修改点 3: FP1 必须传完整的 6 维数据 ---
+        # 因为 fp1 定义的输入通道包含原始 input_dim (128 + 6)
         l0_points = self.fp1(
             l0_xyz,
             l1_xyz,
-            l0_points,   # 🔥 不再 concat cls_label
+            xyz,         # <--- 这里保持传完整的 [B, 6, N]
             l1_points
         )
 
