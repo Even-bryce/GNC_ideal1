@@ -77,7 +77,7 @@ def main():
         delta_s=0.5,
         r_corridor=0.03,
         r_local=0.05,
-        rho=1000.0
+        rho=30000
     )
 
     optimizer = torch.optim.Adam(

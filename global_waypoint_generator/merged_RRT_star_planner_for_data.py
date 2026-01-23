@@ -831,6 +831,60 @@ def find_straight_waypoint(ori_path, env_map, epsilon=2.0, check_step=0.5, safet
     
     return final_waypoints.tolist()
 
+
+        
+        
+def plot_sample_scores(xyz, labels, best_path, waypoints, map_dim):
+    """
+    可视化生成的样本点及其得分
+    :param xyz: [N, 3] 采样点的真实物理坐标
+    :param labels: [N, 1] 每个点的得分 (0~1)
+    :param best_path: [K, 3] 真实路径
+    :param waypoints: [M, 3] 关键点
+    :param map_dim: (Lx, Ly, Lz) 地图尺寸
+    """
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # 1. 绘制采样点 (散点图)
+    # 技巧：过滤掉得分极低的点，或者让它们非常透明，否则会遮挡高分点
+    # 这里我们根据分数设置颜色和大小
+    
+    # 展平 label
+    scores = labels.flatten()
+    
+    # 颜色映射
+    p = ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], 
+                   c=scores,              # 颜色深浅代表分数
+                   cmap='jet',            # 蓝-青-黄-红 (红为高分)
+                   s=scores*50 + 2,       # 大小也随分数变化，高分点更大
+                   alpha=0.6,             # 透明度
+                   label='Sampled Points')
+    
+    fig.colorbar(p, ax=ax, label='Score (Label)')
+
+    # 2. 绘制真实路径 (黑色线条)
+    path_arr = np.array(best_path)
+    ax.plot(path_arr[:, 0], path_arr[:, 1], path_arr[:, 2], 
+            c='black', linewidth=3, label='Ground Truth Path')
+
+    # 3. 绘制关键点 (红色星号)
+    wp_arr = np.array(waypoints)
+    ax.scatter(wp_arr[:, 0], wp_arr[:, 1], wp_arr[:, 2], 
+               c='red', marker='*', s=200, label='Waypoints')
+
+    # 4. 设置坐标轴
+    ax.set_xlim(0, map_dim[0])
+    ax.set_ylim(0, map_dim[1])
+    ax.set_zlim(0, map_dim[2])
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title('Data Sample Visualization: Points Score vs Ground Truth')
+    ax.legend()
+    
+    plt.show()
+
 def save_sample(
     env_map,
     file_path,
@@ -840,7 +894,8 @@ def save_sample(
     alpha=0.4,      # 路径基础分权重
     sigma1=0.05,    # 路段宽度 (归一化后)
     sigma2=0.02,    # 关键点精度 (归一化后)
-    eps=1e-8
+    eps=1e-8,
+    visualize=False
 ):
     """
     生成并保存一个训练样本 (.npz)
@@ -900,14 +955,16 @@ def save_sample(
         
         # 距离
         return np.linalg.norm(P - Proj, axis=1)
+    
+
+    
 
     # ==========================================
     # 1. 预处理输入数据
     # ==========================================
-    path_arr = np.asarray(best_path, dtype=np.float32)   # [K, 3]
-    wp_arr   = np.asarray(waypoints, dtype=np.float32)   # [M, 3]
+    path_arr = np.asarray(best_path, dtype=np.float32)   
+    wp_arr   = np.asarray(waypoints, dtype=np.float32)   
     
-    # 提取起点和终点用于特征编码 (假设 waypoints 包含 S 和 G)
     S = wp_arr[0]
     G = wp_arr[-1]
     
@@ -930,30 +987,25 @@ def save_sample(
             valid_pts.append(p)
 
     if len(valid_pts) == 0:
-        # 极端情况处理：如果没采到点，至少保留 waypoints
         pts = wp_arr.copy()
     else:
         pts = np.asarray(valid_pts, dtype=np.float32)
 
     # ==========================================
-    # 3. 组合最终点集 (包含 S, G 和采样点)
+    # 3. 组合最终点集
     # ==========================================
-    # 也可以选择把所有 waypoints 都加进去，保证关键点一定被覆盖
-    # 这里保持原逻辑：只强制加 S 和 G，其他随机
+    # 这里 xyz 存储的是【真实物理坐标】，这一点对绘图很重要
     xyz = np.vstack([S[None], G[None], pts]) 
     N_real = xyz.shape[0]
 
     # ==========================================
     # 4. 构建输入特征 (Input Features)
     # ==========================================
-    # 坐标归一化
     xyz_norm = (xyz - center) / (scale + eps)
     
-    # 障碍物距离
     d_obs = np.array([get_min_distance_to_obstacles(p, obstacles) for p in xyz], dtype=np.float32)
     d_obs_norm = d_obs / (scale + eps)
     
-    # 起终点相对距离场
     d_s = np.linalg.norm(xyz - S[None], axis=1)
     d_g = np.linalg.norm(xyz - G[None], axis=1)
     denom = d_s + d_g + eps
@@ -966,48 +1018,31 @@ def save_sample(
     ], axis=1).astype(np.float32)
 
     # ==========================================
-    # 5. 标签计算 (Label Generation) - 核心修改
+    # 5. 标签计算 (Label Generation)
     # ==========================================
     labels = np.zeros((N_real, 1), dtype=np.float32)
     
-    # --- 计算 d_point (每个点到最近 waypoints 的距离) ---
-    # 使用广播机制计算所有采样点到所有 waypoints 的距离矩阵
-    # xyz: [N, 3], wp_arr: [M, 3]
-    # dists: [N, M]
+    # --- 计算 d_point ---
     dists_to_wps = np.linalg.norm(xyz[:, None, :] - wp_arr[None, :, :], axis=2)
-    d_point = np.min(dists_to_wps, axis=1) # [N,] 取最近的那个 waypoint 距离
+    d_point = np.min(dists_to_wps, axis=1) 
 
-    # --- 计算 d_line (每个点到 best_path 多段线的最近距离) ---
+    # --- 计算 d_line ---
     d_line = np.full(N_real, float('inf'), dtype=np.float32)
     
-    # 遍历 best_path 的每一段线段 (A -> B)
-    # 这种写法比计算 N*K 的矩阵更省内存，虽然是用循环，但内部是向量化的
     for k in range(len(path_arr) - 1):
         A = path_arr[k]
         B = path_arr[k+1]
-        
-        # 计算所有点到当前线段 AB 的距离
         d_segment = point_to_segment_distance(xyz, A, B)
-        
-        # 更新最小距离
         d_line = np.minimum(d_line, d_segment)
 
     # --- 标签混合公式 ---
-    # 归一化距离 (注意：sigma 是基于归一化尺度的，所以这里距离也要除以 scale)
     d_line_norm = d_line / scale
     d_point_norm = d_point / scale
     
-    # Calculate terms
-    # Term 1: 路径基础分 (对应 alpha * exp(...))
-    y_line = alpha * np.exp(- (d_line_norm ** 2) / (2 * sigma1 ** 2))
+    y_line = alpha * np.exp(- (d_line_norm ** 2) / (2 * sigma1))
+    y_point = 1.0 * np.exp(- (d_point_norm ** 2) / (2 * sigma2))
     
-    # Term 2: 航路点高分 (对应 1.0 * exp(...))
-    y_point = 1.0 * np.exp(- (d_point_norm ** 2) / (2 * sigma2 ** 2))
-    
-    # Max pooling
     labels[:, 0] = np.maximum(y_line, y_point)
-
-    # 强制修正：起点和终点肯定是 1.0 (虽然公式也能算出1.0，但防止浮点误差)
     labels[0, 0] = 1.0 
     labels[1, 0] = 1.0
 
@@ -1016,7 +1051,13 @@ def save_sample(
     # ==========================================
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     np.savez(file_path, points=points, labels=labels)
-    # print(f"Saved {file_path}, N={N_real}")
+    
+    # ==========================================
+    # 7. [新增] 可视化模块
+    # ==========================================
+    if visualize:
+        print(f"[Visualizing] Plotting scores for {file_path}...")
+        plot_sample_scores(xyz, labels, best_path, waypoints, env_map["map_dim"])
     
 
 
@@ -1126,7 +1167,8 @@ if __name__ == '__main__':
                     alpha=0.4,
                     sigma1=0.05,
                     sigma2=0.02,
-                    eps=1e-8
+                    eps=1e-8,
+                    visualize=False
                 )
                 
                 # --- ⚠️ 警告：批量生成时请注释掉绘图，否则会弹出2000个窗口或内存溢出 ---
