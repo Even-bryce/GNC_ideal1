@@ -201,7 +201,7 @@ class RRTStar:
         delta = max(c_best**2 - c_min**2, 0.0)
         a1 = c_best / 2.0
         a2 = math.sqrt(delta) / 2.0
-        a3 = self.max_rand[2]  # Z 方向不受限制
+        a3 = self.max_rand[2]  # Z 方向不受限制，或者通常取 a2
 
         L = np.diag([a1, a2, a3])
 
@@ -228,7 +228,7 @@ class RRTStar:
         c_theta = np.dot(ex, direction)
         s_theta = np.linalg.norm(v)
 
-        if s_theta < 1e-9:  
+        if s_theta < 1e-9:
             if c_theta > 0:
                 R = np.eye(3)
             else:
@@ -252,8 +252,22 @@ class RRTStar:
         center = (start + goal) / 2.0
         sample = R @ (L @ p) + center
 
-        return sample.tolist()
-    
+        # ==================================================================
+        # 5. [新增] 边界保护逻辑
+        # ==================================================================
+        # 检查生成点是否在地图范围内
+        if (self.min_rand[0] <= sample[0] <= self.max_rand[0] and
+            self.min_rand[1] <= sample[1] <= self.max_rand[1] and
+            self.min_rand[2] <= sample[2] <= self.max_rand[2]):
+            
+            return sample.tolist()
+        else:
+            # 如果超出范围，回退到全局均匀随机采样
+            return [
+                random.uniform(self.min_rand[0], self.max_rand[0]),
+                random.uniform(self.min_rand[1], self.max_rand[1]),
+                random.uniform(self.min_rand[2], self.max_rand[2]),
+            ]
     
 #---------------------------steer--------------------------   
     def steer(self, from_node, to_node):
@@ -1067,8 +1081,8 @@ def save_sample(
 
 if __name__ == '__main__':
     # ================= 配置区域 =================
-    NUM_MAPS = 10          # 地图数量
-    TASKS_PER_MAP = 200    # 每个地图的任务数
+    NUM_MAPS = 1          # 地图数量
+    TASKS_PER_MAP = 5    # 每个地图的任务数
     BASE_SEED = 39         # 基础随机种子
     
     # 保存路径 (使用 raw string r"..." 防止转义错误)
@@ -1165,8 +1179,8 @@ if __name__ == '__main__':
                     waypoints=straight_waypoints,
                     N_attempts=4096,
                     alpha=0.4,
-                    sigma1=0.05,
-                    sigma2=0.02,
+                    sigma1=0.04,
+                    sigma2=0.01,
                     eps=1e-8,
                     visualize=False
                 )
