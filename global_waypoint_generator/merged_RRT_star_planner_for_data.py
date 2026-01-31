@@ -1053,8 +1053,8 @@ def save_sample(
     d_line_norm = d_line / scale
     d_point_norm = d_point / scale
     
-    y_line = alpha * np.exp(- (d_line_norm ** 2) / (2 * sigma1))
-    y_point = 1.0 * np.exp(- (d_point_norm ** 2) / (2 * sigma2))
+    y_line = alpha * np.exp(- (d_line_norm ** 2) / (2 * sigma1**2))
+    y_point = 1.0 * np.exp(- (d_point_norm ** 2) / (2 * sigma2**2))
     
     labels[:, 0] = np.maximum(y_line, y_point)
     labels[0, 0] = 1.0 
@@ -1081,8 +1081,8 @@ def save_sample(
 
 if __name__ == '__main__':
     # ================= 配置区域 =================
-    NUM_MAPS = 1          # 地图数量
-    TASKS_PER_MAP = 5    # 每个地图的任务数
+    NUM_MAPS = 10          # 地图数量
+    TASKS_PER_MAP = 200    # 每个地图的任务数
     BASE_SEED = 39         # 基础随机种子
     
     # 保存路径 (使用 raw string r"..." 防止转义错误)
@@ -1179,8 +1179,8 @@ if __name__ == '__main__':
                     waypoints=straight_waypoints,
                     N_attempts=4096,
                     alpha=0.4,
-                    sigma1=0.04,
-                    sigma2=0.01,
+                    sigma1=0.2,
+                    sigma2=0.1,
                     eps=1e-8,
                     visualize=False
                 )

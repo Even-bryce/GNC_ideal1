@@ -66,25 +66,98 @@ class get_model(nn.Module):
         return x
 
 
-def weighted_bce_loss(logits, targets, weights=None):
-    """
-    logits:  [B, N, 1]
-    targets: [B, N, 1] (0/1)
-    weights: [B, N] or None
-    这个版本没有加mask，理论上来说要加的，但是padding的点很少，且targets全为0，对loss影响不大
-    """
-    logits = logits.squeeze(-1)
-    targets = targets.squeeze(-1).float()
+# def weighted_bce_loss(logits, targets, weights=None, pos_ratio=10):
+#     """
+#     logits:  [B, N, 1]
+#     targets: [B, N, 1] (0/1)
+#     weights: [B, N] (可选，原本的样本权重，如果没有特殊需求可以不传)
+#     pos_ratio: 正样本权重系数。建议设为 (总点数/正样本数)
+#     """
+#     # 1. 维度调整
+#     logits = logits.squeeze(-1)   # [B, N]
+#     targets = targets.squeeze(-1).float() # [B, N]
 
-    if weights is None:
-        loss = F.binary_cross_entropy_with_logits(
-            logits, targets, reduction='mean'
-        )
+#     # 2. 核心修改：定义 pos_weight
+#     # 它的作用是：预测错了正样本(1)，惩罚是预测错负样本(0)的 pos_ratio 倍
+#     # 注意：必须把它放到和 logits 同一个 device (cuda) 上
+#     pos_weight = torch.tensor([pos_ratio], device=logits.device)
+
+#     # 3. 计算 Loss
+#     # 注意这里多传了一个 pos_weight 参数
+#     if weights is None:
+#         loss = F.binary_cross_entropy_with_logits(
+#             logits, 
+#             targets, 
+#             pos_weight=pos_weight,  # <--- 关键修改
+#             reduction='mean'
+#         )
+#     else:
+#         # 如果你还想保留原来的 weights (比如某种空间掩码)，可以同时用
+#         loss = F.binary_cross_entropy_with_logits(
+#             logits, 
+#             targets, 
+#             weight=weights, 
+#             pos_weight=pos_weight,  # <--- 关键修改
+#             reduction='mean'
+#         )
+        
+#     return loss
+
+def focal_loss(logits, targets, weights=None, alpha=0.9, gamma=2.0):
+    """
+    【严格遵循 Soft Focal Loss 公式版本】
+    
+    Formula:
+        Loss = -alpha_t * (1 - p_t)^gamma * log(p_t)
+    Where:
+        p_t = y * p + (1 - y) * (1 - p)
+        alpha_t = alpha * y + (1 - alpha) * (1 - y)
+    
+    Args:
+        logits:  [B, N] (未经过 Sigmoid 的原始输出)
+        targets: [B, N] (0~1 之间的软标签)
+        weights: [B, N] (可选空间权重)
+        alpha:   必须在 [0, 1] 之间。平衡正负样本权重。
+        gamma:   聚焦系数，推荐 2.0。
+    """
+    # 1. 维度对齐
+    logits = logits.squeeze(-1) if logits.dim() > 2 else logits # [B, N]
+    targets = targets.squeeze(-1).float() if targets.dim() > 2 else targets # [B, N]
+
+    # 2. 计算概率 p (Sigmoid)
+    probs = torch.sigmoid(logits)
+
+    # 3. 计算 p_t (根据公式：预测与标签的一致性概率)
+    # 这里的 targets 就是公式里的 y，probs 就是 p
+    # p_t = y*p + (1-y)*(1-p)
+    p_t = targets * probs + (1 - targets) * (1 - probs)
+
+    # 4. 计算 Modulating Factor (聚焦因子)
+    # 公式：(1 - p_t)^gamma
+    modulating_factor = (1 - p_t) ** gamma
+
+    # 5. 计算 Alpha_t (平衡因子)
+    # 公式：alpha_t = alpha * y + (1 - alpha) * (1 - y)
+    # 注意：严格按照公式，alpha 必须在 [0, 1] 之间
+    if alpha >= 0:
+        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
     else:
-        loss = F.binary_cross_entropy_with_logits(
-            logits, targets, weight=weights, reduction='mean'
-        )
-    return loss
+        alpha_t = 1.0
+
+    # 6. 计算基础 BCE Loss
+    # F.binary_cross_entropy_with_logits 对应公式中的 -[y log p + (1-y) log(1-p)]
+    bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+
+    # 7. 组合最终 Loss
+    # Loss = alpha_t * (1 - p_t)^gamma * BCE
+    loss = alpha_t * modulating_factor * bce_loss
+
+    # 8. 处理额外的空间权重 (weights)
+    if weights is not None:
+        weights = weights.squeeze(-1) if weights.dim() > loss.dim() else weights
+        loss = loss * weights
+
+    return loss.mean()
 
 # def straightness_loss(
 #     p,               # [B, N]
@@ -117,35 +190,38 @@ def weighted_bce_loss(logits, targets, weights=None):
 #     return loss
 
 def straightness_loss(
-    p,                   # [B, N]
-    xyz,                 # [B, N, 3] (已归一化)
-    delta_s=0.5,
+    p,                  # [B, N]
+    xyz,                # [B, N, 3] (已归一化)
+    delta_s=0.5,        # 筛选高分点的阈值
+    delta_d=0.2,        # <--- 新增参数：只有距离大于该值的点对才计算 Loss
     r_corridor=0.03,
-    rho=1000.0,
+    rho=20000.0,
     alpha2=1.0,
     eps=1e-6,
-    M_max=64             # 可选：最多取多少个高 p 点
+    M_max=128           # 限制计算复杂度的最大点数
 ):
     """
-    只对 p_i > delta_s 的点子集计算 straightness
-    复杂度 ~ O(M^3), M << N
+    修改版 straightness_loss:
+    1. 仅当 dist_ij > delta_d 时计算 Loss
+    2. 去除了公式中的 * dist_ij，不再显式奖励长距离
     """
-
+    
     B, N, _ = xyz.shape
     device = xyz.device
     total_loss = []
 
     for b in range(B):
         # --------------------------------------------------
-        # 1. 筛选高置信点
+        # 1. 筛选高置信点 (High Confidence Points)
         # --------------------------------------------------
         mask = p[b] > delta_s
         idx = torch.nonzero(mask, as_tuple=False).squeeze(-1)
 
+        # 如果高分点太少，无法构成任何点对，跳过
         if idx.numel() < 2:
             continue
 
-        # 可选：限制最大点数，防止极端情况
+        # 限制计算量：如果有太多高分点，只取分数最高的 M_max 个
         if idx.numel() > M_max:
             topk = torch.topk(p[b, idx], M_max).indices
             idx = idx[topk]
@@ -155,50 +231,74 @@ def straightness_loss(
         M = xb.shape[0]
 
         # --------------------------------------------------
-        # 2. 点对距离
+        # 2. 计算距离并生成距离掩码 (Distance Mask)
         # --------------------------------------------------
         dist_ij = torch.cdist(xb, xb)  # [M, M]
+        
+        # <--- 修改点 A: 生成 Mask，只有距离足够远的点对才有效
+        valid_pair_mask = (dist_ij > delta_d).float()
+        
+        # 如果当前没有满足距离要求的点对，跳过
+        num_valid_pairs = valid_pair_mask.sum()
+        if num_valid_pairs < 1:
+            continue
 
         # --------------------------------------------------
-        # 3. corridor 点数 N_ij（局部）
+        # 3. 计算 Corridor 内的阻挡点数 N_ij
+        #    (计算逻辑不变，依然基于几何投影)
         # --------------------------------------------------
-        xi = xb.unsqueeze(1)  # [M, 1, 3]
-        xj = xb.unsqueeze(0)  # [1, M, 3]
+        xi = xb.unsqueeze(1)          # [M, 1, 3]
+        xj = xb.unsqueeze(0)          # [1, M, 3]
         xk = xb.unsqueeze(0).unsqueeze(0)  # [1, 1, M, 3]
 
-        v = xj - xi           # [M, M, 3]
-        w = xk - xi.unsqueeze(1)  # [M, 1, M, 3]
-
-        vv = (v ** 2).sum(-1, keepdim=True) + eps
+        v = xj - xi                   # [M, M, 3] 向量 i->j
+        
+        # 计算投影比例 t
+        # 注意：为了防止除以0，分母加 eps。
+        # 其实 dist_ij 已经在上面算过了，vv = dist_ij^2，可以复用优化，但为了逻辑清晰保留原样
+        vv = (v ** 2).sum(-1, keepdim=True) + eps 
+        
+        w = xk - xi.unsqueeze(1)      # [M, 1, M, 3] 向量 i->k
+        
         t = (w * v.unsqueeze(1)).sum(-1, keepdim=True) / vv.unsqueeze(1)
-        t = torch.clamp(t, 0.0, 1.0)
+        t = torch.clamp(t, 0.0, 1.0)  # 限制在线段内
 
-        proj = xi.unsqueeze(1) + t * v.unsqueeze(1)
-        d_k_to_seg = torch.norm(xk - proj, dim=-1)  # [M, M, M]
+        proj = xi.unsqueeze(1) + t * v.unsqueeze(1) # 点 k 在线段 ij 上的投影点
+        d_k_to_seg = torch.norm(xk - proj, dim=-1)  # [M, M, M] 点 k 到线段 ij 的垂直距离
 
+        # 统计落在圆柱体内的点数
         N_ij = (d_k_to_seg <= r_corridor).sum(dim=-1).float()  # [M, M]
 
         # --------------------------------------------------
-        # 4. corridor 最大容量
+        # 4. 计算理论最大点数 (用于归一化)
         # --------------------------------------------------
         V_corridor = math.pi * r_corridor ** 2 * dist_ij
         N_corridor_max = rho * V_corridor + eps
 
         # --------------------------------------------------
-        # 5. straightness loss
+        # 5. 计算 Loss
         # --------------------------------------------------
         p_i = pb.unsqueeze(1)
         p_j = pb.unsqueeze(0)
 
+        # 直线性惩罚项：中间阻挡点 N_ij 越少，phi_s 越大(接近1)，Loss 越小(越负)
         phi_s = torch.exp(-alpha2 * N_ij / N_corridor_max)
 
-        loss_mat = p_i * p_j * dist_ij * phi_s
+        # <--- 修改点 B: 计算 Loss 矩阵
+        # 原公式: -1 * p_i * p_j * dist_ij * phi_s
+        # 新公式: -1 * p_i * p_j * phi_s  (去掉了 dist_ij)
+        loss_mat = -1 * p_i * p_j * phi_s
 
-        loss_b = loss_mat.mean()
+        # <--- 修改点 C: 应用距离 Mask 并计算平均值
+        # 只对 valid_pair_mask 为 1 的位置求和，并除以有效对的数量
+        # 这样避免了大量无效的 0 值拉低了 Loss 的绝对值
+        loss_b = (loss_mat * valid_pair_mask).sum() / (num_valid_pairs + eps)
+        
         total_loss.append(loss_b)
 
+    # 如果所有 batch 都没有有效点对，返回 0
     if len(total_loss) == 0:
-        return torch.tensor(0.0, device=device)
+        return torch.tensor(0.0, device=device, requires_grad=True)
 
     return torch.stack(total_loss).mean()
 
@@ -216,7 +316,7 @@ def safety_loss(
     xyz,                # [B, N, 3]
     delta_s=0.5,
     r_local=0.05,
-    rho=1000.0,
+    rho=20000.0,
     alpha1=1.0,
     eps=1e-6,
     M_max=128
@@ -311,19 +411,23 @@ class get_loss(nn.Module):
     def __init__(
         self,
         w_bce=1.0,
-        w_straight=0.1,
-        w_safety=0.1,
+        w_straight=3,
+        w_safety=0.2,
         w_conn=0.0,
+        # ---- focal loss 超参
+        alpha=0.95,
+        gamma=2.0, 
         # ---- straightness 超参
         delta_s=0.5,
+        delta_d=0.2,
         r_corridor=0.03,
-        rho=1000.0,
+        rho=20000.0,
         alpha2=1.0,
         M_pair_max=128,
         # ---- safety 超参
         r_local=0.05,
         alpha1=1.0,
-        M_safe_max=128,
+        M_safe_max=256,
         # ----- connectivity 超参
         delta_c=0.1,
         r_connect=0.05
@@ -333,9 +437,12 @@ class get_loss(nn.Module):
         self.w_straight = w_straight
         self.w_safety = w_safety
         self.w_conn = w_conn
+        self.alpha = alpha
+        self.gamma = gamma 
 
         # straightness
         self.delta_s = delta_s
+        self.delta_d = delta_d
         self.r_corridor = r_corridor
         self.rho = rho
         self.alpha2 = alpha2
@@ -364,7 +471,7 @@ class get_loss(nn.Module):
         # -------------------------
         # 1. BCE
         # -------------------------
-        loss += self.w_bce * weighted_bce_loss(logits, targets)
+        loss += self.w_bce * focal_loss(logits, targets, alpha=self.alpha, gamma=self.gamma)
 
         # -------------------------
         # 2. Straightness
@@ -374,6 +481,7 @@ class get_loss(nn.Module):
                 p=p,
                 xyz=xyz,
                 delta_s=self.delta_s,
+                delta_d=self.delta_d,
                 r_corridor=self.r_corridor,
                 rho=self.rho,
                 alpha2=self.alpha2,
