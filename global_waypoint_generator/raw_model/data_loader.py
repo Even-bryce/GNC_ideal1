@@ -44,7 +44,7 @@ def collate_fn(batch):
             # Padding Points: [N, 6] -> [N_max, 6] (补0)
             # 注意：最后3维特征补0不影响，前3维补0意味着原点，最好padding的点在mask里被忽略
             # 但 PointNet++ 对零填充通常具有鲁棒性
-            points_pad = torch.cat([points, torch.zeros(pad_n, 6)], dim=0)
+            points_pad = torch.cat([points, torch.zeros(pad_n, 8)], dim=0)
             
             # Padding Targets: [N, 1] -> [N_max, 1]
             target_pad = torch.cat([target, torch.zeros(pad_n, 1)], dim=0)

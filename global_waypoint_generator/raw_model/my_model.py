@@ -32,7 +32,7 @@ class get_model(nn.Module):
         xyz: [B, 6, N]
         """
         B, C, N = xyz.shape
-        assert C == 6
+        assert C == 8
 
         # --- 修改点 1: 拆分坐标和特征 ---
         l0_xyz = xyz[:, :3, :]      # [B, 3, N] -> 物理坐标 (x,y,z)

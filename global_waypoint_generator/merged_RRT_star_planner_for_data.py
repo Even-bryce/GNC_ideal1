@@ -1074,6 +1074,233 @@ def save_sample(
         plot_sample_scores(xyz, labels, best_path, waypoints, env_map["map_dim"])
     
 
+def save_sample2(
+    env_map,
+    file_path,
+    best_path,      # [K, 3] 真实最优路径的一系列点 (密集)
+    waypoints,      # [M, 3] 真实路径的关键航路点 (稀疏，包含起点和终点)
+    N_attempts=4096,
+    alpha=1.0,      # <--- 建议这里默认改为 1.0，正如我们之前讨论的
+    sigma1=0.05,    # 路段宽度 (归一化后)
+    sigma2=0.02,    # 关键点精度 (归一化后)
+    eps=1e-8,
+    visualize=False
+):
+    """
+    生成并保存一个训练样本 (.npz)
+    
+    修改说明:
+    原 d_obs (最近障碍物距离) 已替换为 obs_normal (最近障碍物的法向量，3维)
+    输出 points shape: [N, 8] -> [x, y, z, nx, ny, nz, f_start, f_goal]
+    """
+    
+    # ==========================================
+    # 内部辅助函数
+    # ==========================================
+    def check_collision(point, obstacles):
+        px, py, pz = point
+        for (ox, oy, zmin, zmax, r_crash, _) in obstacles:
+            if zmin <= pz <= zmax:
+                if (px - ox)**2 + (py - oy)**2 <= r_crash**2:
+                    return True
+        return False
+
+    def get_nearest_obstacle_normal(point, obstacles):
+        """
+        计算点到最近障碍物的单位法向量 (指向远离障碍物的方向)
+        返回: np.array([nx, ny, nz])
+        """
+        px, py, pz = point
+        min_dist = float('inf')
+        # 默认法向量（如果没有障碍物或出错），通常不会发生因为场景总有边界或物体
+        # 这里给一个随机或者零向量都可以，但在有效范围内肯定会被覆盖
+        best_normal = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+
+        for (ox, oy, zmin, zmax, r_crash, _) in obstacles:
+            # --- 1. 计算点相对于圆柱体的几何关系 ---
+            dx = px - ox
+            dy = py - oy
+            d_xy = np.sqrt(dx**2 + dy**2) + eps # 防止除0
+            
+            # 水平方向的单位向量 (从圆心指向外)
+            ux = dx / d_xy
+            uy = dy / d_xy
+            
+            # 计算各维度到表面的有向距离 (positive means outside)
+            dist_xy = d_xy - r_crash
+            
+            dist_z = 0.0
+            vz = 0.0 # 垂直方向单位分量
+            
+            if pz > zmax:
+                dist_z = pz - zmax
+                vz = 1.0 # 在上方，向上指
+            elif pz < zmin:
+                dist_z = zmin - pz # 距离为正
+                vz = -1.0 # 在下方，向下指
+            else:
+                dist_z = 0.0 # 在Z范围内
+                vz = 0.0
+
+            # --- 2. 确定该障碍物是否是最近的 ---
+            # 我们需要计算欧氏距离来比较谁最近
+            curr_dist = float('inf')
+            
+            # 分三种区域讨论距离
+            if dist_xy > 0 and dist_z <= 0:   # 侧面区域
+                curr_dist = dist_xy
+            elif dist_xy <= 0 and dist_z > 0: # 上下底面区域 (圆柱盖子上方/下方)
+                curr_dist = dist_z
+            elif dist_xy > 0 and dist_z > 0:  # 角落区域 (斜上方/斜下方)
+                curr_dist = np.sqrt(dist_xy**2 + dist_z**2)
+            else: 
+                # 理论上 valid points 不会进入内部 (check_collision 过滤了)
+                # 但如果刚好在表面或数值误差，视为距离0
+                curr_dist = 0.0
+            
+            # --- 3. 如果更近，更新法向量 ---
+            if curr_dist < min_dist:
+                min_dist = curr_dist
+                
+                # 计算该障碍物对该点的法向量
+                nx, ny, nz = 0.0, 0.0, 0.0
+                
+                if dist_xy > 0 and dist_z <= 0:   # [侧面]: 法向量水平
+                    nx, ny, nz = ux, uy, 0.0
+                elif dist_xy <= 0 and dist_z > 0: # [顶底]: 法向量垂直
+                    nx, ny, nz = 0.0, 0.0, vz
+                elif dist_xy > 0 and dist_z > 0:  # [角落]: 向量合成
+                    # 向量 = 水平分量 + 垂直分量
+                    # 水平部分长度: dist_xy, 方向: (ux, uy)
+                    # 垂直部分长度: dist_z,  方向: vz
+                    vx = dist_xy * ux
+                    vy = dist_xy * uy
+                    vz_vec = dist_z * vz
+                    
+                    # 归一化
+                    norm = np.sqrt(vx**2 + vy**2 + vz_vec**2) + eps
+                    nx, ny, nz = vx/norm, vy/norm, vz_vec/norm
+                else:
+                    # 极其罕见的情况（在内部），默认为水平向外推
+                    nx, ny, nz = ux, uy, 0.0
+                    
+                best_normal = np.array([nx, ny, nz], dtype=np.float32)
+
+        return best_normal
+
+    def point_to_segment_distance(P, A, B):
+        AB = B - A
+        AP = P - A
+        ab_sq = np.dot(AB, AB) + eps
+        t = np.dot(AP, AB) / ab_sq
+        t = np.clip(t, 0.0, 1.0)
+        Proj = A + t[:, np.newaxis] * AB
+        return np.linalg.norm(P - Proj, axis=1)
+
+    # ==========================================
+    # 1. 预处理输入数据
+    # ==========================================
+    path_arr = np.asarray(best_path, dtype=np.float32)   
+    wp_arr   = np.asarray(waypoints, dtype=np.float32)   
+    
+    S = wp_arr[0]
+    G = wp_arr[-1]
+    
+    Lx, Ly, Lz = env_map["map_dim"]
+    xyz_min = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    xyz_max = np.array([Lx, Ly, Lz], dtype=np.float32)
+    obstacles = env_map["obstacles"]
+    
+    center = 0.5 * (xyz_min + xyz_max)
+    scale = max(Lx, Ly, Lz)
+
+    # ==========================================
+    # 2. 批量采样 (One-Pass)
+    # ==========================================
+    candidates = np.random.uniform(xyz_min, xyz_max, size=(N_attempts, 3))
+    valid_pts = []
+    
+    for p in candidates:
+        if not check_collision(p, obstacles):
+            valid_pts.append(p)
+
+    if len(valid_pts) == 0:
+        pts = wp_arr.copy()
+    else:
+        pts = np.asarray(valid_pts, dtype=np.float32)
+
+    # ==========================================
+    # 3. 组合最终点集
+    # ==========================================
+    xyz = np.vstack([S[None], G[None], pts]) 
+    N_real = xyz.shape[0]
+
+    # ==========================================
+    # 4. 构建输入特征 (Input Features)
+    # ==========================================
+    xyz_norm = (xyz - center) / (scale + eps)
+    
+    # --- [修改核心] 计算最近障碍物的法向量 ---
+    # 输出 shape: [N, 3]
+    obs_normals = np.array([get_nearest_obstacle_normal(p, obstacles) for p in xyz], dtype=np.float32)
+    
+    d_s = np.linalg.norm(xyz - S[None], axis=1)
+    d_g = np.linalg.norm(xyz - G[None], axis=1)
+    denom = d_s + d_g + eps
+    f_start = d_g / denom
+    f_goal  = d_s / denom
+    
+    # --- [修改核心] 堆叠特征 ---
+    # 现在维度变成了 8: [x, y, z, nx, ny, nz, f_start, f_goal]
+    points = np.stack([
+        xyz_norm[:, 0], xyz_norm[:, 1], xyz_norm[:, 2], # Index 0-2: 坐标
+        obs_normals[:, 0], obs_normals[:, 1], obs_normals[:, 2], # Index 3-5: 障碍物法向量
+        f_start,                                        # Index 6: Start特征
+        f_goal                                          # Index 7: Goal特征
+    ], axis=1).astype(np.float32)
+
+    # ==========================================
+    # 5. 标签计算 (Label Generation)
+    # ==========================================
+    labels = np.zeros((N_real, 1), dtype=np.float32)
+    
+    # --- 计算 d_point ---
+    dists_to_wps = np.linalg.norm(xyz[:, None, :] - wp_arr[None, :, :], axis=2)
+    d_point = np.min(dists_to_wps, axis=1) 
+
+    # --- 计算 d_line ---
+    d_line = np.full(N_real, float('inf'), dtype=np.float32)
+    for k in range(len(path_arr) - 1):
+        A = path_arr[k]
+        B = path_arr[k+1]
+        d_segment = point_to_segment_distance(xyz, A, B)
+        d_line = np.minimum(d_line, d_segment)
+
+    # --- 标签混合公式 ---
+    d_line_norm = d_line / scale
+    d_point_norm = d_point / scale
+    
+    y_line = alpha * np.exp(- (d_line_norm ** 2) / (2 * sigma1**2))
+    y_point = 1.0 * np.exp(- (d_point_norm ** 2) / (2 * sigma2**2))
+    
+    labels[:, 0] = np.maximum(y_line, y_point)
+    labels[0, 0] = 1.0 
+    labels[1, 0] = 1.0
+
+    # ==========================================
+    # 6. 保存
+    # ==========================================
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    np.savez(file_path, points=points, labels=labels)
+    
+    # ==========================================
+    # 7. 可视化模块 (如果需要)
+    # ==========================================
+    if visualize:
+        print(f"[Visualizing] Plotting scores for {file_path}...")
+        # 注意：这里的 visualize 函数可能需要适配新的 points 维度，
+        # 但如果不画特征只画 xyz 和 labels，原函数应该可以用
+        plot_sample_scores(xyz, labels, best_path, waypoints, env_map["map_dim"])
 
 
 
@@ -1086,7 +1313,7 @@ if __name__ == '__main__':
     BASE_SEED = 39         # 基础随机种子
     
     # 保存路径 (使用 raw string r"..." 防止转义错误)
-    SAVE_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\raw_model\train_data"
+    SAVE_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\raw_model\train_data2"
     
     # RRT* 参数
     R_AGENT_CRASH = 1.2
@@ -1172,15 +1399,15 @@ if __name__ == '__main__':
                 print(f"M{map_id}_T{task_id:<8} | {'Success':<10} | {elapsed:<10.4f} | {plen:<10.4f}")
                 
                 # --- 保存数据 ---
-                save_sample(
+                save_sample2(
                     env_map,
                     file_path=full_save_path, # 传入完整路径
                     best_path=path,
                     waypoints=straight_waypoints,
                     N_attempts=4096,
                     alpha=0.4,
-                    sigma1=0.2,
-                    sigma2=0.1,
+                    sigma1=0.3,
+                    sigma2=0.2,
                     eps=1e-8,
                     visualize=False
                 )
