@@ -12,12 +12,12 @@ import math
 
 
 class get_model(nn.Module):
-    def __init__(self, num_classes, input_dim=6):
+    def __init__(self, num_classes, input_dim=8):
         super(get_model, self).__init__()
 
-        # 删除normal_channel参数，因为自由点云不含法向量
-        self.sa1 = PointNetSetAbstraction(npoint=512, radius=0.2, nsample=32, in_channel=input_dim, mlp=[64, 64, 128], group_all=False)
-        self.sa2 = PointNetSetAbstraction(npoint=128, radius=0.4, nsample=64, in_channel=128 + 3, mlp=[128, 128, 256], group_all=False)
+        # 删除normal_channel参数，简化设计
+        self.sa1 = PointNetSetAbstraction(npoint=512, radius=0.1, nsample=32, in_channel=input_dim, mlp=[64, 64, 128], group_all=False)
+        self.sa2 = PointNetSetAbstraction(npoint=128, radius=0.2, nsample=64, in_channel=128 + 3, mlp=[128, 128, 256], group_all=False)
         self.sa3 = PointNetSetAbstraction(npoint=None, radius=None, nsample=None, in_channel=256 + 3, mlp=[256, 512, 1024], group_all=True)
         self.fp3 = PointNetFeaturePropagation(in_channel=1280, mlp=[256, 256])
         self.fp2 = PointNetFeaturePropagation(in_channel=384, mlp=[256, 128])
@@ -26,21 +26,20 @@ class get_model(nn.Module):
         self.bn1 = nn.BatchNorm1d(128)
         self.drop1 = nn.Dropout(0.5)
         self.conv2 = nn.Conv1d(128, num_classes, 1)
+        self.input_dim = input_dim
 
     def forward(self, xyz):
         """
-        xyz: [B, 6, N]
+        xyz: [B, input_dim, N]
         """
         B, C, N = xyz.shape
-        assert C == 8
+        assert C == self.input_dim
 
         # --- 修改点 1: 拆分坐标和特征 ---
         l0_xyz = xyz[:, :3, :]      # [B, 3, N] -> 物理坐标 (x,y,z)
         l0_features = xyz[:, 3:, :] # [B, 3, N] -> 额外特征 (dist, start, goal)
 
-        # --- 修改点 2: SA1 只传 3 维特征 ---
-        # 内部逻辑: concat(l0_features, relative_xyz) = 3 + 3 = 6 维
-        # 正好匹配 self.sa1 定义的 in_channel=6
+        # --- 修改点 2: SA1 只传额外特征 ---
         l1_xyz, l1_points = self.sa1(l0_xyz, l0_features)
         
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)

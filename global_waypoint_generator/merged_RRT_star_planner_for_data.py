@@ -1016,6 +1016,9 @@ def save_sample(
     # 4. 构建输入特征 (Input Features)
     # ==========================================
     xyz_norm = (xyz - center) / (scale + eps)
+
+    # print(max(xyz_norm[:,0]), max(xyz_norm[:,1]), max(xyz_norm[:,2]))
+    # print(min(xyz_norm[:,0]), min(xyz_norm[:,1]), min(xyz_norm[:,2]))
     
     d_obs = np.array([get_min_distance_to_obstacles(p, obstacles) for p in xyz], dtype=np.float32)
     d_obs_norm = d_obs / (scale + eps)
@@ -1313,7 +1316,7 @@ if __name__ == '__main__':
     BASE_SEED = 39         # 基础随机种子
     
     # 保存路径 (使用 raw string r"..." 防止转义错误)
-    SAVE_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\raw_model\train_data2"
+    SAVE_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\raw_model\train_data3"
     
     # RRT* 参数
     R_AGENT_CRASH = 1.2

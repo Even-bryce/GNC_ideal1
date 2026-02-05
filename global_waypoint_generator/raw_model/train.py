@@ -95,12 +95,12 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
             # [关键修复 2] 自动识别维度提取距离通道，防止报错
             if points.shape[2] == probs.shape[1]: 
                 # Case A: [B, C, N] (N 在最后) -> 取第4,5通道
-                dist_start = points[:, 6, :]
-                dist_end   = points[:, 7, :]
+                dist_start = points[:, 4, :]
+                dist_end   = points[:, 5, :]
             else:
                 # Case B: [B, N, C] (N 在中间) -> 取第4,5特征
-                dist_start = points[:, :, 6]
-                dist_end   = points[:, :, 7]
+                dist_start = points[:, :, 4]
+                dist_end   = points[:, :, 5]
 
             is_start_end = (dist_start < 0.05) | (dist_end < 0.05)
 
@@ -189,12 +189,12 @@ def main():
     # 1. Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    save_dir = os.path.join(ROOT_PATH, "checkpoints2")
+    save_dir = os.path.join(ROOT_PATH, "checkpoints")
     os.makedirs(save_dir, exist_ok=True)
     print(f"Checkpoints will be saved to: {save_dir}")
 
     # 2. Model
-    model = get_model(num_classes=1, input_dim=8).to(device)
+    model = get_model(num_classes=1, input_dim=6).to(device)
 
     # 3. Loss Configuration
     criterion = get_loss(
@@ -218,7 +218,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.5)
 
     # 4. Data Loading
-    data_dir = os.path.join(ROOT_PATH, "train_data2")
+    data_dir = os.path.join(ROOT_PATH, "train_data")
     all_files = glob.glob(os.path.join(data_dir, "*.npz"))
     
     if len(all_files) == 0:

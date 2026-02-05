@@ -99,7 +99,7 @@ def evaluate(model_path, data_dir):
 
     # 1. 加载模型
     # 注意：确保这里的 input_dim 和你训练时一致 (6)
-    model = get_model(num_classes=1, input_dim=8).to(device)
+    model = get_model(num_classes=1, input_dim=6).to(device)
 
     print(f"Loading checkpoint from: {model_path}")
     if not os.path.exists(model_path):
@@ -161,11 +161,11 @@ if __name__ == "__main__":
     # --- 配置路径 (请确保这些路径在你本地是正确的) ---
 
     # 1. 数据文件夹路径
-    DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\raw_model\train_data2"
+    DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\raw_model\train_data"
 
     # 2. 权重文件路径
     # 确保这里指向你训练好的 best_model.pth
-    CKPT_PATH = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\raw_model\checkpoints2\best_model.pth"
+    CKPT_PATH = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\raw_model\checkpoints\best_model.pth"
 
     # 打印路径确认
     print("-" * 50)
