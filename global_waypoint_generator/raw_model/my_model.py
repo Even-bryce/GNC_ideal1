@@ -1,67 +1,117 @@
 
 '''
-pointnet++开源代码来源：https://github.com/yanx27/Pointnet_Pointnet2_pytorch/tree/master/models
+pointtransformer开源代码来源：https://github.com/POSTECH-CVLab/point-transformer
+官方版本：https://github.com/Pointcept/Pointcept
 这是我改造的版本
 '''
 
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
-from pointnet2_utils import PointNetSetAbstraction,PointNetFeaturePropagation
+# 引入新的 Transformer 模块
+from pointnet2_utils import PointTransformerSetAbstraction, PointTransformerFeaturePropagation
 import math
 
 
 class get_model(nn.Module):
     def __init__(self, num_classes, input_dim=8):
         super(get_model, self).__init__()
+        self.input_dim = input_dim
 
-        # 删除normal_channel参数，简化设计
-        self.sa1 = PointNetSetAbstraction(npoint=512, radius=0.1, nsample=32, in_channel=input_dim, mlp=[64, 64, 128], group_all=False)
-        self.sa2 = PointNetSetAbstraction(npoint=128, radius=0.2, nsample=64, in_channel=128 + 3, mlp=[128, 128, 256], group_all=False)
-        self.sa3 = PointNetSetAbstraction(npoint=None, radius=None, nsample=None, in_channel=256 + 3, mlp=[256, 512, 1024], group_all=True)
-        self.fp3 = PointNetFeaturePropagation(in_channel=1280, mlp=[256, 256])
-        self.fp2 = PointNetFeaturePropagation(in_channel=384, mlp=[256, 128])
-        self.fp1 = PointNetFeaturePropagation(in_channel=128+input_dim, mlp=[128, 128, 128])
+        # --- SA1: 第一层 ---
+        # 逻辑说明：
+        # 1. 输入给 SA1 的是：绝对坐标 (3维) + 额外特征 (input_dim-3 维)
+        # 2. SA1 内部会做 sample_and_group：
+        #    - 使用绝对坐标计算距离和找邻居。
+        #    - 自动计算相对坐标 delta = p_neighbor - p_center (3维)。
+        #    - 将 delta (3维) 与 额外特征 (5维) 拼接。
+        # 3. 所以 SA1 的输入特征维度 in_channel 依然等于 input_dim (3+5=8)。
+        self.sa1 = PointTransformerSetAbstraction(
+            npoint=512, radius=0.1, nsample=32, 
+            in_channel=input_dim,  # 这里接收的是 (计算出的相对坐标 + 外部传入的特征)
+            mlp=[64, 64, 128], 
+            group_all=False, k=16
+        )
+
+        # --- SA2: 第二层 ---
+        # 上一层输出特征维度 128
+        # 加上这一层内部计算的相对坐标 3 -> 128 + 3 = 131
+        self.sa2 = PointTransformerSetAbstraction(
+            npoint=128, radius=0.2, nsample=64, 
+            in_channel=128 + 3, mlp=[128, 128, 256], 
+            group_all=False, k=16
+        )
+
+        # --- SA3: 全局层 ---
+        # 上一层输出 256 + 3 = 259
+        self.sa3 = PointTransformerSetAbstraction(
+            npoint=None, radius=None, nsample=None, 
+            in_channel=256 + 3, mlp=[256, 512, 1024], 
+            group_all=True, k=16
+        )
+
+        # --- FP3 ---
+        # l3(1024) + l2(256) = 1280
+        self.fp3 = PointTransformerFeaturePropagation(in_channel=1280, mlp=[256, 256], k=16)
+
+        # --- FP2 ---
+        # l2(256) + l1(128) = 384
+        self.fp2 = PointTransformerFeaturePropagation(in_channel=384, mlp=[256, 128], k=16)
+
+        # --- FP1 ---
+        # l1(128) + l0(原始输入 input_dim=8) = 136
+        # 这里的 l0 是 Skip Connection，我们把最原始的包含绝对坐标和特征的 input_dim 传进来
+        # 虽然 PointTransformer 内部主要看特征，但保留原始几何信息对分割边缘很有帮助
+        self.fp1 = PointTransformerFeaturePropagation(in_channel=128 + input_dim, mlp=[128, 128, 128], k=16)
+
+        # --- Head ---
         self.conv1 = nn.Conv1d(128, 128, 1)
         self.bn1 = nn.BatchNorm1d(128)
         self.drop1 = nn.Dropout(0.5)
         self.conv2 = nn.Conv1d(128, num_classes, 1)
-        self.input_dim = input_dim
 
     def forward(self, xyz):
         """
         xyz: [B, input_dim, N]
+             xyz[:, :3, :] -> 归一化后的绝对坐标 (Absolute Coords)
+             xyz[:, 3:, :] -> 其他特征 (Features)
         """
         B, C, N = xyz.shape
-        assert C == self.input_dim
+        
+        # 1. 显式拆分坐标和特征
+        l0_xyz = xyz[:, :3, :] 
+        
+        # l0_features: 仅包含非坐标的特征 (如 input_dim=8, 这里就是 5 维)
+        if self.input_dim > 3:
+            l0_features = xyz[:, 3:, :] 
+        else:
+            l0_features = None
 
-        # --- 修改点 1: 拆分坐标和特征 ---
-        l0_xyz = xyz[:, :3, :]      # [B, 3, N] -> 物理坐标 (x,y,z)
-        l0_features = xyz[:, 3:, :] # [B, 3, N] -> 额外特征 (dist, start, goal)
-
-        # --- 修改点 2: SA1 只传额外特征 ---
+        # 2. Encoder
         l1_xyz, l1_points = self.sa1(l0_xyz, l0_features)
         
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
         l3_xyz, l3_points = self.sa3(l2_xyz, l2_points)
 
+        # 3. Decoder
         l2_points = self.fp3(l2_xyz, l3_xyz, l2_points, l3_points)
         l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points)
+        
+        # FP1 Skip Connection
+        l0_points = self.fp1(l0_xyz, l1_xyz, xyz, l1_points)
 
-        # --- 修改点 3: FP1 必须传完整的 6 维数据 ---
-        # 因为 fp1 定义的输入通道包含原始 input_dim (128 + 6)
-        l0_points = self.fp1(
-            l0_xyz,
-            l1_xyz,
-            xyz,         # <--- 这里保持传完整的 [B, 6, N]
-            l1_points
-        )
-
+        # 4. Classification Head
         feat = F.relu(self.bn1(self.conv1(l0_points)))
         x = self.drop1(feat)
-        x = self.conv2(x)           # [B, 1, N]
-
-        x = x.permute(0, 2, 1)      # [B, N, 1]
+        x = self.conv2(x) # 输出: [B, 1, N]
+        
+        # [核心修正 A] 删除了 F.log_softmax
+        # 二分类任务直接输出 raw logits，交给 BCEWithLogitsLoss 或 FocalLoss 处理
+        
+        x = x.permute(0, 2, 1) # [B, N, 1]
+        
+        # [核心修正 B] 只返回预测值 Tensor，不返回 Tuple
+        # 解决了 train.py 中的 TypeError
         return x
 
 
@@ -458,27 +508,52 @@ class get_loss(nn.Module):
 
     def forward(self, logits, targets, xyz):
         """
-        logits : [B, N, 1]
+        logits : [B, N, 1] 或 (logits, features) 元组
         targets: [B, N, 1]
-        xyz    : [B, N, 3]  (已归一化)
+        xyz    : [B, input_dim, N] (例如 [B, 8, N])
         """
 
-        p = torch.sigmoid(logits).squeeze(-1)  # [B, N]
+        # ==========================================
+        #  数据清洗与适配 (专治各种维度报错)
+        # ==========================================
 
+        # 1. 解包 Tuple (如果模型返回了多余特征)
+        if isinstance(logits, (tuple, list)):
+            logits = logits[0]  # 只取预测值 [B, N, 1]
+
+        # 2. 提取物理坐标 (用于几何 Loss)
+        # 输入 xyz 可能是 [B, 8, N] (Channel-First)，我们需要 [B, N, 3]
+        if xyz.shape[1] == 8 or xyz.shape[1] == 3:  
+            # 如果第1维是特征通道 (3或8)，说明是 [B, C, N]，需要转置
+            xyz_phys = xyz.permute(0, 2, 1) # -> [B, N, C]
+        else:
+            xyz_phys = xyz
+        
+        # 只取前3个通道 (x, y, z)，丢掉后面的特征
+        xyz_phys = xyz_phys[..., :3]  # 确保是 [B, N, 3]
+
+        # 3. 准备概率 p (用于 Mask 筛选)
+        # logits: [B, N, 1] -> squeeze -> [B, N]
+        p = torch.sigmoid(logits)
+        if p.dim() == 3:
+            p = p.squeeze(-1)
+
+        # ==========================================
+        #  Loss 计算
+        # ==========================================
         loss = 0.0
 
+        # 1. BCE / Focal Loss
         # -------------------------
-        # 1. BCE
-        # -------------------------
+        # 此时 logits 和 targets 应该都是 [B, N, 1]，focal_loss 内部会自动 squeeze
         loss += self.w_bce * focal_loss(logits, targets, alpha=self.alpha, gamma=self.gamma)
 
-        # -------------------------
-        # 2. Straightness
+        # 2. Straightness Loss
         # -------------------------
         if self.w_straight > 0:
             loss += self.w_straight * straightness_loss(
                 p=p,
-                xyz=xyz,
+                xyz=xyz_phys,      # 传入清洗好的物理坐标 [B, N, 3]
                 delta_s=self.delta_s,
                 delta_d=self.delta_d,
                 r_corridor=self.r_corridor,
@@ -487,13 +562,12 @@ class get_loss(nn.Module):
                 M_max=self.M_pair_max
             )
 
-        # -------------------------
-        # 3. Safety
+        # 3. Safety Loss
         # -------------------------
         if self.w_safety > 0:
             loss += self.w_safety * safety_loss(
                 p=p,
-                xyz=xyz,
+                xyz=xyz_phys,      # 传入清洗好的物理坐标 [B, N, 3]
                 delta_s=self.delta_s,
                 r_local=self.r_local,
                 rho=self.rho,
@@ -501,13 +575,12 @@ class get_loss(nn.Module):
                 M_max=self.M_safe_max
             )
 
-        # -------------------------
-        # 4. Connectivity（你目前不用，留接口）
+        # 4. Connectivity Loss
         # -------------------------
         if self.w_conn > 0:
             loss += self.w_conn * connectivity_loss(
                 p=p,
-                xyz=xyz,
+                xyz=xyz_phys,      # 传入清洗好的物理坐标 [B, N, 3]
                 r_connect=self.r_connect,
                 delta_c=self.delta_c
             )

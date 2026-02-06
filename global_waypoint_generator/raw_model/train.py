@@ -13,12 +13,12 @@ import matplotlib.pyplot as plt  # <--- 修改 1: 导入绘图库
 # Your absolute path to raw_model
 ROOT_PATH = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\raw_model"
 GAMMA = 2 
-TOTAL_EPOCHS = 20        
+TOTAL_EPOCHS = 40         
 # ---------------------
 
 def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
     # --- Warm-up 策略 ---
-    if epoch_idx <= 15:
+    if epoch_idx <= 25:
         criterion.w_straight = 0.0
         criterion.delta_s = 0.01
         criterion.delta_d = 0.06  
@@ -35,9 +35,8 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
     # --- Statistics Lists ---
     max_probs = []
     neg_max_probs = []  
-    neg_fpr_list = []   # <--- 保留：你的 FPR 列表
+    neg_fpr_list = []
 
-    # [新增] 拆分后的统计列表
     se_mean_probs = []   # 起终点得分
     mid_mean_probs = []  # 中间点得分
 
@@ -47,116 +46,107 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
 
         # points: [B, N, C] -> [B, C, N]
         points = points.permute(0, 2, 1) 
+        
+        # 提取物理坐标用于 Loss
         xyz = points[:, :3, :].permute(0, 2, 1) # [B, N, 3]
 
         optimizer.zero_grad()
-        logits = model(points)
+        
+        # 1. 模型前向传播
+        output = model(points) 
+        
+        # 2. [核心修复] 如果模型返回元组 (logits, features)，只取 logits
+        # 这一步是为了给后面的 loss 和 监控代码使用
+        if isinstance(output, (tuple, list)):
+            logits = output[0]
+        else:
+            logits = output
+
+        # 3. 计算 Loss (传入解包后的 logits)
         loss = criterion(logits, targets, xyz)
+        
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
 
-        # --- Monitoring Logic (融合修复版) ---
+        # --- Monitoring Logic ---
         with torch.no_grad():
+            # 这里用的 logits 已经是解包后的 Tensor 了，所以 sigmoid 不会报错
             probs = torch.sigmoid(logits)
             
-            # [关键修复 1] 确保维度统一，去掉最后的 1
             if probs.dim() == 3: probs = probs.squeeze(-1)   # [B, N]
             if targets.dim() == 3: targets = targets.squeeze(-1) # [B, N]
 
             max_probs.append(probs.max().item())
             
-            # --- 1. 负样本统计 (FPR & Neg_Max) ---
-            # 你的原始逻辑：小于 0.1 或 等于 0 视为负样本
+            # --- 负样本统计 ---
             neg_mask = (targets < 0.1) 
             if neg_mask.sum() > 0:
                 neg_probs = probs[neg_mask]
                 neg_max_probs.append(neg_probs.max().item())
                 
-                # 计算 FPR (假阳性率): 负样本中得分 > 0.5 的比例
                 num_false_pos = (neg_probs > 0.5).float().sum()
                 fpr = num_false_pos / neg_probs.numel()
                 neg_fpr_list.append(fpr.item())
 
-            # --- 2. 正样本拆分统计 (Mid_Mean) ---
-            pos_mask = (targets > 0.9) # 正样本
+            # --- 正样本统计 ---
+            pos_mask = (targets > 0.9)
             
-            # # [关键修复 2] 自动识别维度提取距离通道，防止报错
-            # if points.shape[2] == probs.shape[1]: 
-            #     # Case A: [B, C, N] (N 在最后) -> 取第4,5通道
-            #     dist_start = points[:, 4, :]
-            #     dist_end   = points[:, 5, :]
-            # else:
-            #     # Case B: [B, N, C] (N 在中间) -> 取第4,5特征
-            #     dist_start = points[:, :, 4]
-            #     dist_end   = points[:, :, 5]
+            # 自动识别维度提取距离通道
+            if points.shape[1] > 5: # 确保通道数够
+                if points.shape[2] == probs.shape[1]: 
+                    # Case A: [B, C, N]
+                    dist_start = points[:, 4, :]
+                    dist_end   = points[:, 5, :]
+                else:
+                    # Case B: [B, N, C]
+                    dist_start = points[:, :, 4]
+                    dist_end   = points[:, :, 5]
 
+                is_start_end = (dist_start < 0.05) | (dist_end < 0.05)
+                mask_SE = pos_mask & is_start_end       
+                mask_MID = pos_mask & (~is_start_end)   
 
-            # [关键修复 2] 自动识别维度提取距离通道，防止报错
-            if points.shape[2] == probs.shape[1]: 
-                # Case A: [B, C, N] (N 在最后) -> 取第4,5通道
-                dist_start = points[:, 4, :]
-                dist_end   = points[:, 5, :]
-            else:
-                # Case B: [B, N, C] (N 在中间) -> 取第4,5特征
-                dist_start = points[:, :, 4]
-                dist_end   = points[:, :, 5]
+                if mask_SE.sum() > 0:
+                    se_mean_probs.append(probs[mask_SE].mean().item())
+                
+                if mask_MID.sum() > 0:
+                    mid_mean_probs.append(probs[mask_MID].mean().item())
 
-            is_start_end = (dist_start < 0.05) | (dist_end < 0.05)
-
-            # 拆分
-            mask_SE = pos_mask & is_start_end       # 起终点
-            mask_MID = pos_mask & (~is_start_end)   # 中间航路点
-
-            if mask_SE.sum() > 0:
-                se_mean_probs.append(probs[mask_SE].mean().item())
-            
-            if mask_MID.sum() > 0:
-                mid_mean_probs.append(probs[mask_MID].mean().item())
-
-    # --- Calculate Epoch Averages ---
-    avg_max_prob = np.mean(max_probs)
+    # --- Averages ---
     avg_neg_max = np.mean(neg_max_probs) if len(neg_max_probs) > 0 else 0.0
-    avg_fpr = np.mean(neg_fpr_list) if len(neg_fpr_list) > 0 else 0.0 # <--- 你的 FPR 均值
-    
+    avg_fpr = np.mean(neg_fpr_list) if len(neg_fpr_list) > 0 else 0.0
     avg_se_mean = np.mean(se_mean_probs) if len(se_mean_probs) > 0 else 0.0
     avg_mid_mean = np.mean(mid_mean_probs) if len(mid_mean_probs) > 0 else 0.0
 
-    # --- 打印所有指标 (包含 FPR) ---
     print(f"[Debug Ep{epoch_idx}] {phase_name} | "
-          f"SE:{avg_se_mean:.3f} | "    # 起终点
-          f"Mid:{avg_mid_mean:.3f} | "  # 中间点 (重点关注!)
+          f"SE:{avg_se_mean:.3f} | "    
+          f"Mid:{avg_mid_mean:.3f} | "  
           f"NegMax:{avg_neg_max:.3f} | "
-          f"FPR:{avg_fpr:.4f}")         # <--- 恢复 FPR 打印
+          f"FPR:{avg_fpr:.4f}")         
 
     return total_loss / len(loader)
 
 @torch.no_grad()
 def validate(model, loader, device, gamma):
-
     model.eval()
-
     total_loss = 0.0
 
-
-
     for points, targets in loader:
-
         points = points.to(device)
-
         targets = targets.to(device)
-
         points = points.permute(0, 2, 1)
 
         logits = model(points)
 
+        # ==========================================
+        #  [核心修改] 这里必须处理 Tuple 返回值！
+        # ==========================================
+        if isinstance(logits, (tuple, list)):
+            logits = logits[0]  # 只取预测值 Tensor
+
         loss = focal_loss(logits, targets, gamma=gamma)
-
         total_loss += loss.item()
-
-
-
-    return total_loss / len(loader)
 
     return total_loss / len(loader)
 
