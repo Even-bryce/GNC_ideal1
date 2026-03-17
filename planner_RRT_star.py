@@ -19,7 +19,7 @@ class Node:
 
 # 定义 RRTStar 类，用于实现 RRT* 算法
 class RRTStar:
-    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=25, max_iter=1500, search_radius=20.0, search_until_max_iter=True):
+    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=25, max_iter=1500, search_radius=20.0, search_until_max_iter=False):
         """
         初始化 RRT* 算法的参数
         :param start: 起点坐标 [x, y, z]
@@ -467,13 +467,13 @@ if __name__ == '__main__':
     # 1. 生成地图
     print("正在生成地图...")
     env_map = env_generator(
-        rho=0.6, 
-        map_size=1500,
+        rho=0.3, 
+        map_size=5000,
         r_crash_range=(30, 50),
         r_risk_range=(3, 7),
         zmax_range=(30, 240),
         z_size=240,
-        max_iter=5000,
+        max_iter=10000,
         seed=40
     )
     obstacle_list = env_map["obstacles"]
@@ -484,7 +484,7 @@ if __name__ == '__main__':
     num_of_tasks = 1
     # print("正在生成", num_of_tasks, "对合法的起终点")
     # tasks = generate_valid_tasks(num_of_tasks, env_map, seed=100)
-    tasks = [([0,0,0],[1500, 1500, 50]),([0, 1500, 0],[1500, 0, 150])] # 对角线起终点
+    tasks = [([0, 0, 0], [5000, 5000, 100])] # 对角线起终点
     
     # 3. 运行测试
     success_times = []
@@ -498,7 +498,7 @@ if __name__ == '__main__':
     print("-" * 80)
     
     # 对每个起终点，进行num_pf_tests次规划
-    num_of_tests = 50
+    num_of_tests = 200
     for i, (start, goal) in enumerate(tasks):
         env_first_times = []
         env_final_times = []
@@ -516,7 +516,7 @@ if __name__ == '__main__':
                 obstacle_list=obstacle_list, 
                 rand_area=[0, env_map["size"], env_map["z_size"]], 
                 expand_dis=100,    # 步长
-                max_iter=1000,    # 迭代次数
+                max_iter=10000,    # 迭代次数
                 search_radius=120.0
             )
             start_time = time.time()
