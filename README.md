@@ -1,1 +1,0 @@
-# GNC_ideal1
