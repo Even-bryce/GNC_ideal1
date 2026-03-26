@@ -17,10 +17,10 @@ ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
 SAVE_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\experiments\checkpoints"
 
 # 2. 真实的训练数据路径
-DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data"
+DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
 
-GAMMA = 2.0 
-TOTAL_EPOCHS = 10         
+GAMMA = 1.5 
+TOTAL_EPOCHS = 50         
 # ---------------------      
 # ---------------------
 
@@ -32,7 +32,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
         criterion.delta_d = 0.06  
         phase_name = "Warm-up (BCE Only)"
     else:
-        criterion.w_straight = 5.0
+        criterion.w_straight = 2.0
         criterion.delta_s = 0.6
         criterion.delta_d = 0.06    
         phase_name = "Refinement (Geo Loss Active)"
@@ -43,13 +43,14 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
     # --- Statistics Lists ---
     max_probs, neg_max_probs, neg_fpr_list = [], [], []
     se_mean_probs, mid_mean_probs = [], []
+    mid_fnr_list = []  # 💡 新增：专门记录中间航路点的漏检率
 
-    for batch_idx, (points, targets) in enumerate(loader):
+    for batch_idx, (points, targets, gt_waypoints_list) in enumerate(loader):
         points = points.to(device)
         targets = targets.to(device)
 
         # 确保 points 是 [B, C, N] 格式
-        if points.shape[-1] == 6 or points.shape[-1] == 8:
+        if points.shape[-1] >= 6:
             points = points.permute(0, 2, 1) 
         
         # 提取物理坐标用于 Loss: [B, N, 3]
@@ -79,26 +80,27 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
 
             max_probs.append(probs.max().item())
             
-            # --- 负样本统计 ---
+            # --- 负样本统计 (误报监控) ---
             neg_mask = (targets < 0.1) 
             if neg_mask.sum() > 0:
                 neg_probs = probs[neg_mask]
                 neg_max_probs.append(neg_probs.max().item())
                 
+                # 误报：真值不是航路点，但预测概率 > 0.5
                 num_false_pos = (neg_probs > 0.5).float().sum()
                 fpr = num_false_pos / neg_probs.numel()
                 neg_fpr_list.append(fpr.item())
 
-            # --- 正样本统计 ---
+            # --- 正样本统计 (漏检监控) ---
             pos_mask = (targets > 0.9)
             
             # 自动提取距离特征 (适配起点和终点)
-            if points.shape[1] > 5: 
-                # 当前 points 为 [B, C, N]
-                dist_start = points[:, 4, :]
-                dist_end   = points[:, 5, :]
+            if points.shape[1] >= 6:  # 只要总维度够，直接取倒数两列
+                f_start = points[:, 3, :]  
+                f_goal  = points[:, 4, :]
 
-                is_start_end = (dist_start < 0.05) | (dist_end < 0.05)
+                is_start_end = (f_start > 0.95) | (f_goal > 0.95)
+                
                 mask_SE = pos_mask & is_start_end       
                 mask_MID = pos_mask & (~is_start_end)   
 
@@ -106,19 +108,28 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
                     se_mean_probs.append(probs[mask_SE].mean().item())
                 
                 if mask_MID.sum() > 0:
-                    mid_mean_probs.append(probs[mask_MID].mean().item())
+                    mid_probs = probs[mask_MID]
+                    mid_mean_probs.append(mid_probs.mean().item())
+                    
+                    # 💡 新增：漏检（真值是航路点，但预测概率 < 0.5）
+                    num_false_neg = (mid_probs < 0.5).float().sum()
+                    fnr = num_false_neg / mid_probs.numel()
+                    mid_fnr_list.append(fnr.item())
 
     # --- Averages ---
     avg_neg_max = np.mean(neg_max_probs) if len(neg_max_probs) > 0 else 0.0
     avg_fpr = np.mean(neg_fpr_list) if len(neg_fpr_list) > 0 else 0.0
     avg_se_mean = np.mean(se_mean_probs) if len(se_mean_probs) > 0 else 0.0
     avg_mid_mean = np.mean(mid_mean_probs) if len(mid_mean_probs) > 0 else 0.0
+    avg_mid_fnr = np.mean(mid_fnr_list) if len(mid_fnr_list) > 0 else 0.0  # 💡 新增平均漏检率
 
+    # 💡 更新打印面板，加入 FNR(漏检)
     print(f"[Debug Ep{epoch_idx}] {phase_name} | "
           f"SE:{avg_se_mean:.3f} | "    
           f"Mid:{avg_mid_mean:.3f} | "  
           f"NegMax:{avg_neg_max:.3f} | "
-          f"FPR:{avg_fpr:.4f}")         
+          f"FPR(误报):{avg_fpr:.4f} | "
+          f"FNR(漏检):{avg_mid_fnr:.4f}")         
 
     return total_loss / len(loader)
 
@@ -134,11 +145,11 @@ def validate(model, loader, criterion, device):
     # 验证集不需要动态改变直线性权重，可根据需求固定
     # criterion.w_straight = 5.0 
 
-    for points, targets in loader:
+    for points, targets, gt_waypoints_list in loader:
         points = points.to(device)
         targets = targets.to(device)
         
-        if points.shape[-1] == 6 or points.shape[-1] == 8:
+        if points.shape[-1] >= 6:
             points = points.permute(0, 2, 1)
             
         xyz = points[:, :3, :].permute(0, 2, 1).contiguous()
@@ -171,15 +182,39 @@ def main():
     # 1. Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # --- 【修改这里】直接使用顶部的 SAVE_DIR ---
     save_dir = SAVE_DIR
     os.makedirs(save_dir, exist_ok=True)
     print(f"Checkpoints will be saved to: {save_dir}")
 
-    # 2. Model
-    model = get_model(num_classes=1, input_dim=6).to(device)
+    # ==========================================
+    # 2. Data Loading (整体挪到了模型前面)
+    # ==========================================
+    data_dir = DATA_DIR
+    all_files = glob.glob(os.path.join(data_dir, "*.npz"))
+    
+    if len(all_files) == 0:
+        print(f"Error: No .npz files found in {data_dir}")
+        return
 
-    # 3. Loss Configuration
+    split = int(len(all_files) * 0.8)
+    train_files = all_files[:split]
+    val_files = all_files[split:]
+
+    train_loader = build_dataloader(train_files, batch_size=32, shuffle=True)
+    val_loader   = build_dataloader(val_files, batch_size=32, shuffle=False)
+
+    # --- 【最简单的动态探针】 ---
+    # 拿一个 batch 出来探测真实维度 (DataLoader 输出的 points 形状通常为 [B, N, C])
+    sample_points, _, curr_gt_waypoints= next(iter(train_loader))
+    real_input_dim = sample_points.shape[-1]
+    print(f"[*] 动态检测到数据特征维度为: {real_input_dim}")
+
+    # ==========================================
+    # 3. Model (传入刚刚探测出来的真实维度)
+    # ==========================================
+    model = get_model(num_classes=1, input_dim=real_input_dim).to(device)
+
+    # 4. Loss Configuration
     criterion = get_loss(
         w_bce=20,
         w_straight=3,
@@ -199,23 +234,6 @@ def main():
     )
     
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.5)
-
-    # 4. Data Loading
-    # --- 【修改这里】直接使用顶部的 DATA_DIR ---
-    data_dir = DATA_DIR
-    all_files = glob.glob(os.path.join(data_dir, "*.npz"))
-    
-    if len(all_files) == 0:
-        print(f"Error: No .npz files found in {data_dir}")
-        return
-
-
-    split = int(len(all_files) * 0.8)
-    train_files = all_files[:split]
-    val_files = all_files[split:]
-
-    train_loader = build_dataloader(train_files, batch_size=8, shuffle=True)
-    val_loader   = build_dataloader(val_files, batch_size=8, shuffle=False)
 
     train_loss_list = []
     val_loss_list = []
@@ -258,6 +276,7 @@ def main():
     print("绘制最终 Loss 曲线...")
     plot_loss_curve(train_loss_list, val_loss_list, save_dir)
 
+    
 if __name__ == "__main__":
     print("开始计时...")
     start_time = time.time()

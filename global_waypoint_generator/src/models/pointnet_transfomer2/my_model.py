@@ -326,7 +326,7 @@ class get_loss(nn.Module):
         self.r_local = r_local; self.alpha1 = alpha1; self.M_safe_max = M_safe_max
         self.delta_c = delta_c; self.r_connect = r_connect
 
-    def forward(self, logits, targets, xyz):
+    def forward(self, logits, targets, xyz, full_points=None):
         if isinstance(logits, (tuple, list)): logits = logits[0]
         if xyz.shape[1] == 8 or xyz.shape[1] == 3: xyz_phys = xyz.permute(0, 2, 1)
         else: xyz_phys = xyz
@@ -334,8 +334,24 @@ class get_loss(nn.Module):
         p = torch.sigmoid(logits)
         if p.dim() == 3: p = p.squeeze(-1)
         
+        # --- 【核心拦截器】利用负索引生成 Ignore Mask ---
+        bce_weights = None
+        if full_points is not None and full_points.shape[1] >= 6:
+
+            f_start = full_points[:, 3, :]
+            f_goal  = full_points[:, 4, :]
+            
+            # 找出起终点 (特征值趋近于 1.0)
+            is_start_end = ((f_start > 0.95) | (f_goal > 0.95)).float()
+            
+            # 权重反转：起终点的权重被无情置为 0，其它普通点权重保留为 1
+            bce_weights = 1.0 - is_start_end
+
         loss = 0.0
-        loss += self.w_bce * focal_loss(logits, targets, alpha=self.alpha, gamma=self.gamma)
+        # 将拦截器权重传入 focal_loss，起终点不再产生分类梯度！
+        loss += self.w_bce * focal_loss(logits, targets, weights=bce_weights, alpha=self.alpha, gamma=self.gamma)
+        
+        # 几何 Loss 依然保留起点和终点，因为它们是必须连通的物理锚点
         if self.w_straight > 0:
             loss += self.w_straight * straightness_loss(p=p, xyz=xyz_phys, delta_s=self.delta_s, delta_d=self.delta_d, r_corridor=self.r_corridor, rho=self.rho, alpha2=self.alpha2, M_max=self.M_pair_max)
         if self.w_safety > 0:

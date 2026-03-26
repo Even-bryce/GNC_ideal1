@@ -13,40 +13,42 @@ class PathPointDataset(Dataset):
         # 加载数据
         data = np.load(self.data_files[idx])
 
-        # 修正：对应 save_sample 的键名 'points' 和 'labels'
-        # points shape: [N, 6] (前3维是xyz，后3维是特征)
+        # points shape: [N, D] (前3维是xyz，后D-3维是特征)
         points = torch.from_numpy(data['points']).float() 
         
         # labels shape: [N, 1]
         target = torch.from_numpy(data['labels']).float()
 
-        return points, target
+        # ==========================================
+        # [新增] 提取真实航路点 (包含起终点)
+        # waypoints shape: [M, 3] (M 是不固定的)
+        # ==========================================
+        waypoints = torch.from_numpy(data['waypoints']).float()
+
+        return points, target, waypoints
 
 def collate_fn(batch):
     """
     处理变长点云的 Padding
     返回:
-        points_batch:  [B, N_max, 6]
+        points_batch:  [B, N_max, D]
         targets_batch: [B, N_max, 1]
+        waypoints_list: 一个长度为 B 的 list，里面每个元素是 [M, 3] 的 Tensor
     """
-    # 获取当前 batch 中最大的点数 N_max
-    # batch[i][0] 是 points, batch[i][1] 是 target
+    # batch[i][0] 是 points, batch[i][1] 是 target, batch[i][2] 是 waypoints
     N_max = max(item[0].shape[0] for item in batch)
 
     points_list = []
     targets_list = []
+    waypoints_list = []  # [新增] 专门用来装变长航路点
 
-    for points, target in batch:
+    for points, target, waypoints in batch:
         N = points.shape[0]
         pad_n = N_max - N
 
         if pad_n > 0:
-            # Padding Points: [N, 6] -> [N_max, 6] (补0)
-            # 注意：最后3维特征补0不影响，前3维补0意味着原点，最好padding的点在mask里被忽略
-            # 但 PointNet++ 对零填充通常具有鲁棒性
-            points_pad = torch.cat([points, torch.zeros(pad_n, 6)], dim=0)
-            
-            # Padding Targets: [N, 1] -> [N_max, 1]
+            C = points.shape[1] 
+            points_pad = torch.cat([points, torch.zeros(pad_n, C, device=points.device)], dim=0)
             target_pad = torch.cat([target, torch.zeros(pad_n, 1)], dim=0)
         else:
             points_pad = points
@@ -54,12 +56,16 @@ def collate_fn(batch):
 
         points_list.append(points_pad)
         targets_list.append(target_pad)
+        
+        # [新增] 直接把没做任何修改的 waypoints 塞进列表
+        waypoints_list.append(waypoints)
 
-    # 堆叠
-    points_batch = torch.stack(points_list)    # [B, N_max, 6]
+    # 堆叠网络需要的输入
+    points_batch = torch.stack(points_list)    # [B, N_max, D]
     targets_batch = torch.stack(targets_list)  # [B, N_max, 1]
 
-    return points_batch, targets_batch
+    # 注意这里返回了三个变量！
+    return points_batch, targets_batch, waypoints_list
 
 def build_dataloader(data_files, batch_size=8, shuffle=True, num_workers=0):
     # Windows下 num_workers 建议设为 0，Linux 可设为 4
