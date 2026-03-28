@@ -317,8 +317,11 @@ def connectivity_loss(p, xyz, r_connect=0.05, delta_c=0.1):
     denom = neighbor_mask.sum().clamp(min=1.0)
     return loss.sum() / denom
 
+
+
+
 class get_loss(nn.Module):
-    def __init__(self, w_bce=1.0, w_straight=3, w_safety=0.2, w_conn=0.0, alpha=0.95, gamma=2.0, delta_s=0.5, delta_d=0.2, r_corridor=0.03, rho=20000.0, alpha2=1.0, M_pair_max=128, r_local=0.05, alpha1=1.0, M_safe_max=256, delta_c=0.1, r_connect=0.05):
+    def __init__(self, w_bce=1.0, w_straight=3, w_safety=0.2, w_conn=0.0, alpha=0.6, gamma=2.0, delta_s=0.5, delta_d=0.2, r_corridor=0.03, rho=20000.0, alpha2=1.0, M_pair_max=128, r_local=0.05, alpha1=1.0, M_safe_max=256, delta_c=0.1, r_connect=0.05):
         super().__init__()
         self.w_bce = w_bce; self.w_straight = w_straight; self.w_safety = w_safety; self.w_conn = w_conn
         self.alpha = alpha; self.gamma = gamma
@@ -334,22 +337,22 @@ class get_loss(nn.Module):
         p = torch.sigmoid(logits)
         if p.dim() == 3: p = p.squeeze(-1)
         
-        # --- 【核心拦截器】利用负索引生成 Ignore Mask ---
-        bce_weights = None
-        if full_points is not None and full_points.shape[1] >= 6:
+        # # --- 【核心拦截器】利用负索引生成 Ignore Mask ---
+        # bce_weights = None
+        # if full_points is not None and full_points.shape[1] >= 6:
 
-            f_start = full_points[:, 3, :]
-            f_goal  = full_points[:, 4, :]
+        #     f_start = full_points[:, 3, :]
+        #     f_goal  = full_points[:, 4, :]
             
-            # 找出起终点 (特征值趋近于 1.0)
-            is_start_end = ((f_start > 0.95) | (f_goal > 0.95)).float()
+        #     # 找出起终点 (特征值趋近于 1.0)
+        #     is_start_end = ((f_start > 0.95) | (f_goal > 0.95)).float()
             
-            # 权重反转：起终点的权重被无情置为 0，其它普通点权重保留为 1
-            bce_weights = 1.0 - is_start_end
+        #     # 权重反转：起终点的权重被无情置为 0，其它普通点权重保留为 1
+        #     bce_weights = 1.0 - is_start_end
 
         loss = 0.0
         # 将拦截器权重传入 focal_loss，起终点不再产生分类梯度！
-        loss += self.w_bce * focal_loss(logits, targets, weights=bce_weights, alpha=self.alpha, gamma=self.gamma)
+        loss += self.w_bce * focal_loss(logits, targets, weights=None, alpha=self.alpha, gamma=self.gamma)
         
         # 几何 Loss 依然保留起点和终点，因为它们是必须连通的物理锚点
         if self.w_straight > 0:

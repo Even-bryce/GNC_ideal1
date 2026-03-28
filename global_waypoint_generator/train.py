@@ -19,22 +19,22 @@ SAVE_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进�
 # 2. 真实的训练数据路径
 DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
 
-GAMMA = 1.5 
+GAMMA = 2 
 TOTAL_EPOCHS = 50         
 # ---------------------      
 # ---------------------
 
 def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
     # --- Warm-up 策略 ---
-    if epoch_idx <= 25:
+    if epoch_idx <= 50:
         criterion.w_straight = 0.0
-        criterion.delta_s = 0.01
-        criterion.delta_d = 0.06  
-        phase_name = "Warm-up (BCE Only)"
+        criterion.delta_s = 0.00
+        criterion.delta_d = 0.00  
+        phase_name = "Warm-up (FOCAL Only)"
     else:
         criterion.w_straight = 2.0
-        criterion.delta_s = 0.6
-        criterion.delta_d = 0.06    
+        criterion.delta_s = 0.8
+        criterion.delta_d = 0.15    
         phase_name = "Refinement (Geo Loss Active)"
 
     model.train()
@@ -217,7 +217,7 @@ def main():
     # 4. Loss Configuration
     criterion = get_loss(
         w_bce=20,
-        w_straight=3,
+        w_straight=0,
         w_safety=0,
         w_conn=0.0,
         gamma=GAMMA,

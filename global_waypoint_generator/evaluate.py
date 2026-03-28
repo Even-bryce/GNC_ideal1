@@ -172,7 +172,7 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
     model.load_state_dict(checkpoint)
     model.eval()
 
-    split = int(len(all_files) * 0.8)
+    split = int(len(all_files) * 0)
     val_files = all_files[split:]
 
     dataset = PathPointDataset(val_files)
