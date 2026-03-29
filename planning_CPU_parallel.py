@@ -6,7 +6,7 @@ from typing import List, Tuple, Dict, Any
 from mpl_toolkits.mplot3d import Axes3D
 from env_generator import env_generator
 from res_show import plot_map, plot_tree_and_path
-from planner_RRT_star import RRTStar, calculate_path_length
+from planner_Bias_RRT_star import RRTStar, calculate_path_length
 
 def plan_segment(args):
     """单个航段的规划函数"""
@@ -172,33 +172,33 @@ if __name__ == '__main__':
     # plot_map(env_map)
     
     # 航路点
-    # waypoints = [[0, 0, 0],
-    #              [1500, 1200, 100],
-    #              [2550, 2350, 100],
-    #              [3800, 3800, 100],
-    #              [5000, 5000, 100]]
     waypoints = [[0, 0, 0],
-                 [1000, 800, 0],
-                 [2000, 1500, 100],
-                 [3000, 2200, 100],
-                 [3750, 2700, 100],
-                 [3800, 3700, 100],
+                 [1500, 1200, 100],
+                 [2550, 2350, 100],
+                 [3800, 3800, 100],
                  [5000, 5000, 100]]
+    # waypoints = [[0, 0, 0],
+    #              [1000, 800, 0],
+    #              [2000, 1500, 100],
+    #              [3000, 2200, 100],
+    #              [3750, 2700, 100],
+    #              [4300, 4000, 100],
+    #              [5000, 5000, 100]]
     
     # 每个航段的参数
     segment_params_list = [
         {'expand_dis': 100, 'max_iter': 10000, 'search_radius': 200.0},
         {'expand_dis': 100, 'max_iter': 10000, 'search_radius': 200.0},
         {'expand_dis': 100, 'max_iter': 10000, 'search_radius': 200.0},
-        {'expand_dis': 100, 'max_iter': 10000, 'search_radius': 200.0},
-        {'expand_dis': 100, 'max_iter': 10000, 'search_radius': 200.0},
+        # {'expand_dis': 100, 'max_iter': 10000, 'search_radius': 200.0},
+        # {'expand_dis': 100, 'max_iter': 10000, 'search_radius': 200.0},
         {'expand_dis': 100, 'max_iter': 10000, 'search_radius': 200.0},
     ]
     
     print(f"使用 {len(waypoints) - 1} 个进程对 {len(waypoints) - 1} 个航段进行并行规划")
     
     # 测试次数
-    num_of_tests = 5
+    num_of_tests = 200
     success_count = 0
     total_time = 0
     all_results = []

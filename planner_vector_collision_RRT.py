@@ -154,11 +154,11 @@ class RRT:
         waypoints: 航路点坐标数组 [[x_1,y_1,z_1],[x_2,y_2,z_2],...,[x_N,y_N,z_N]]
         return: N-1个采样点坐标数组 [rnd_1, rnd_2, ...]
         """
-        # 切片获得 (n-1,3) 的起点与终点数组
+        # (n-1,3) 的起点与终点数组
         starts = waypoints_array[:-1]
         ends = waypoints_array[1:]
         
-        # 计算每段航路的随机点生成范围
+        # 每段航路的随机点生成范围
         mins = np.minimum(starts, ends)
         maxs = np.maximum(starts, ends)
         
@@ -229,61 +229,89 @@ class RRT:
             new_nodes.append(new_node)
         return new_nodes
     
-    def check_collision_vectorized(self, nearest_nodes_lists, new_nodes_list, m = 50):
+    def check_collision_vectorized(self, nearest_nodes_lists, new_nodes_list, m=50):
         """
-        向量化碰撞检测函数
-        :param nearest_nodes_lists: (N-1,)的节点列表
-        :param new_nodes_list: (N-1,)的节点列表
-        :param m: 每条线段的采样点数量
-        :return: (N-1,)的结果列表，True为无碰撞，False为有碰撞
+        优化版向量化碰撞检测：每个航段只检测其空间范围内的障碍物
+        :param nearest_nodes_lists: 起点节点列表 (N-1,)
+        :param new_nodes_list: 终点节点列表 (N-1,)
+        :param m: 每条线段内部的采样点数（不含端点）
+        :return: (N-1,) 布尔列表，True表示无碰撞
         """
-        N_minus_1 = len(nearest_nodes_lists)
+        N = len(nearest_nodes_lists)
         
-        # 转换为 (N-1, 3) 数组
-        nearest_coords = np.array([[node.x, node.y, node.z] for node in nearest_nodes_lists])
-        new_coords = np.array([[node.x, node.y, node.z] for node in new_nodes_list])
+        # 转换为 (N,3) 坐标数组
+        starts = np.array([[node.x, node.y, node.z] for node in nearest_nodes_lists])
+        ends   = np.array([[node.x, node.y, node.z] for node in new_nodes_list])
         
-        # 在连线上均匀采样 m 个点，包含首尾共 m+2 个检测点
-        t_values = np.linspace(0, 1, m + 2)
-
-        # 插值: (1-t) * nearest + t * new，得到 (N-1, m+2, 3) 的采样点
-        t_expanded = t_values[np.newaxis, :, np.newaxis]
-        sample_points = (1 - t_expanded) * nearest_coords[:, np.newaxis, :] + t_expanded * new_coords[:, np.newaxis, :]
+        # 每个航段的包围盒
+        mins = np.minimum(starts, ends)
+        maxs = np.maximum(starts, ends)
         
-        # 展平为 ((N-1)*(m+2), 3) = (N_samples, 3)
-        flat_samples = sample_points.reshape(-1, 3)
-
-        # 障碍物参数： (num_obstacles,)
-        obstacle_array = np.array(self.obstacle_list)
-        obs_x = obstacle_array[:, 0]
-        obs_y = obstacle_array[:, 1]
-        obs_zmin = obstacle_array[:, 2]
-        obs_zmax = obstacle_array[:, 3]
-        obs_radius = obstacle_array[:, 4]
-
-        # 每个采样点到每个障碍物中心的水平距离： (N_samples, num_obstacles)
-        dx = flat_samples[:, 0, np.newaxis] - obs_x[np.newaxis, :]
-        dy = flat_samples[:, 1, np.newaxis] - obs_y[np.newaxis, :]
-        horizontal_dist_sq = dx**2 + dy**2
+        # 障碍物参数
+        obs = np.array(self.obstacle_list)
+        obs_x = obs[:, 0]
+        obs_y = obs[:, 1]
+        obs_zmin = obs[:, 2]
+        obs_zmax = obs[:, 3]
+        obs_r = obs[:, 4]
+        O = len(obs)
         
-        # 比较水平距离与碰撞半径: (N_samples, num_obstacles)
-        in_horizontal = horizontal_dist_sq <= (obs_radius[np.newaxis, :]**2)
+        # 障碍物包围盒
+        obs_xmin = obs_x - obs_r
+        obs_xmax = obs_x + obs_r
+        obs_ymin = obs_y - obs_r
+        obs_ymax = obs_y + obs_r
         
-        # 比较采样点纵坐标与垂直高度: (N_samples, num_obstacles)
-        z = flat_samples[:, 2, np.newaxis]
-        in_vertical = (z >= obs_zmin[np.newaxis, :]) & (z <= obs_zmax[np.newaxis, :])
+        # 航段与障碍物的包围盒重叠检测（全向量化）
+        # 形状 (N, O)
+        overlap_x = (maxs[:, 0:1] >= obs_xmin) & (mins[:, 0:1] <= obs_xmax)
+        overlap_y = (maxs[:, 1:2] >= obs_ymin) & (mins[:, 1:2] <= obs_ymax)
+        overlap_z = (maxs[:, 2:3] >= obs_zmin) & (mins[:, 2:3] <= obs_zmax)
+        overlap = overlap_x & overlap_y & overlap_z   # True 表示该航段可能与障碍物碰撞
         
-        # 每个采样点在每个障碍物内: (N_samples, num_obstacles)
-        in_obstacle = in_horizontal & in_vertical
+        # 采样参数
+        t_vals = np.linspace(0, 1, m + 2)
+        t_exp = t_vals[np.newaxis, :, np.newaxis]
         
-        # 每个采样点在任意障碍物内: (N_samples,)
-        any_obstacle = np.any(in_obstacle, axis=1)
+        # 初始化：无碰撞
+        no_collision = np.ones(N, dtype=bool)
         
-        # 重塑为 (N-1, m+2)
-        collision_by_pair = any_obstacle.reshape(N_minus_1, m + 2)
-        
-        # 每对节点是否有碰撞：(N-1,)
-        no_collision = ~np.any(collision_by_pair, axis=1)
+        # 对每个障碍物单独处理
+        for j in range(O):
+            # 需要检测该障碍物的航段索引
+            seg_idx = np.where(overlap[:, j])[0]
+            if len(seg_idx) == 0:
+                continue
+            
+            # 取出这些航段的起终点
+            start_j = starts[seg_idx]      # (k,3)
+            end_j   = ends[seg_idx]        # (k,3)
+            
+            # 生成这些航段上的采样点 (k, m+2, 3)
+            sample_j = (1 - t_exp) * start_j[:, np.newaxis, :] + t_exp * end_j[:, np.newaxis, :]
+            flat_j = sample_j.reshape(-1, 3)   # (k*(m+2), 3)
+            
+            # 对该障碍物进行碰撞检测
+            dx = flat_j[:, 0] - obs_x[j]
+            dy = flat_j[:, 1] - obs_y[j]
+            dist2_horiz = dx*dx + dy*dy
+            in_horiz = dist2_horiz <= obs_r[j]*obs_r[j]
+            
+            z = flat_j[:, 2]
+            in_vert = (z >= obs_zmin[j]) & (z <= obs_zmax[j])
+            
+            in_obs = in_horiz & in_vert
+            
+            # 重塑为 (k, m+2)，并判断每个航段是否有碰撞
+            coll_j = in_obs.reshape(len(seg_idx), m+2)
+            any_coll = np.any(coll_j, axis=1)   # 长度为k的布尔数组
+            
+            # 更新结果：如果当前障碍物导致某航段碰撞，则标记为False
+            no_collision[seg_idx] &= ~any_coll
+            
+            # 若所有航段均已确定碰撞，可提前退出（可选）
+            if not np.any(no_collision):
+                break
         
         return no_collision.tolist()
     
@@ -350,6 +378,11 @@ if __name__ == '__main__':
                  [3750, 2700, 100],
                  [3800, 3700, 100],
                  [5000, 5000, 100]]
+    # waypoints = [[0, 0, 0],
+    #              [1500, 1200, 100],
+    #              [2550, 2350, 100],
+    #              [3800, 3800, 100],
+    #              [5000, 5000, 100]]
     
     # 设定 RRT* 参数
     r_agent_crash = 1.2
@@ -357,7 +390,7 @@ if __name__ == '__main__':
     env_results = []
     
     # 规划次数
-    num_of_tests = 200  
+    num_of_tests = 500  
     # 测评指标
     success_count = 0
     total_time_first = []      # 首次找到路径的总耗时
