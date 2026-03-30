@@ -151,10 +151,76 @@ def visualize_result(xyz, target, pred_prob, start_pt, goal_pt, gt_mid_wps, pred
 
     cbar = fig.colorbar(plot_handle, ax=[ax1, ax2], shrink=0.7, location='right', pad=0.02)
     cbar.set_label('Probability / Confidence Score')
+
     plt.show()
 
+def filter_zigzag_waypoints(start_pt, goal_pt, mid_wps, min_dist=0.03, local_thresh=0.15, max_turn_angle=60.0):
+    """
+    对聚类提取出的无序航路点进行排序和去曲折筛选 (局部 Z-jitter 消除版)。
+    
+    参数:
+        start_pt, goal_pt: 起点和终点坐标 (1D numpy array)
+        mid_wps: 聚类提取出的中间航路点集合 (N x 3 numpy array)
+        min_dist: 最小容忍距离 (如 0.03)，绝对重叠的点直接剔除
+        local_thresh: 局部区域阈值 (如 0.15)，只有距离小于此值的点，才去校验其转角
+        max_turn_angle: 最大容忍转角 (度)，局部区域内大于此角度认为是抖动，直接剔除
+    """
+    if len(mid_wps) == 0:
+        return mid_wps
+
+    # ==========================================
+    # Step 1: 利用 f_goal 相对比例进行全局排序
+    # ==========================================
+    d_s = np.linalg.norm(mid_wps - start_pt, axis=1)
+    d_g = np.linalg.norm(mid_wps - goal_pt, axis=1)
+    f_goal = d_s / (d_s + d_g + 1e-6)
+    
+    sorted_indices = np.argsort(f_goal)
+    ordered_wps = mid_wps[sorted_indices]
+
+    # ==========================================
+    # Step 2: 局部曲折剪枝 (Local Zig-Zag Pruning)
+    # ==========================================
+    path = [start_pt] + list(ordered_wps) + [goal_pt]
+    
+    i = 1
+    while i < len(path) - 1:
+        prev_pt = path[i-1]
+        curr_pt = path[i]
+        next_pt = path[i+1]
+
+        v_in = curr_pt - prev_pt
+        v_out = next_pt - curr_pt
+        n_in = np.linalg.norm(v_in)
+        n_out = np.linalg.norm(v_out)
+
+        # 规则 1：绝对距离过近 (几乎重叠的冗余点)
+        if n_in < min_dist:
+            path.pop(i)
+            continue 
+
+        # 规则 2：先看距离，再看角度！(你的核心改进)
+        if n_in > 1e-6 and n_out > 1e-6:
+            # 判断当前点是否处于一个“局部小碎步”状态
+            # 如果进入该点或离开该点的步长很短，说明这是一个局部细节
+            if n_in < local_thresh or n_out < local_thresh:
+                
+                # 只有在局部范围内，才去计算转角
+                cos_theta = np.dot(v_in, v_out) / (n_in * n_out)
+                cos_theta = np.clip(cos_theta, -1.0, 1.0)
+                turn_angle = np.degrees(np.arccos(cos_theta))
+                
+                # 如果局部范围内发生了剧烈折返，认定为 Z 字形抖动，剔除
+                if turn_angle > max_turn_angle:
+                    path.pop(i)
+                    continue
+
+        i += 1
+
+    return np.array(path[1:-1])
 
 @torch.no_grad()
+
 def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -226,9 +292,16 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
         pred_xyz_filtered = mid_xyz[pred_mask].cpu().numpy()
         pred_scores_filtered = mid_prob[pred_mask].cpu().numpy()
         
-        pred_mid_waypoints = extract_waypoints(
+        raw_pred_mid_waypoints = extract_waypoints(
             pred_xyz_filtered, pred_scores_filtered, 
             map_dim=map_dim, eps=cluster_eps, peak_radius=peak_radius
+        )
+
+        pred_mid_waypoints = filter_zigzag_waypoints(
+            start_pt, goal_pt, raw_pred_mid_waypoints, 
+            min_dist=0.05,        # 距离阈值，可根据你的尺度微调
+            local_thresh=0.2,   # 局部范围阈值，越大越宽松
+            max_turn_angle=60.0   # 角度阈值，越小越趋近于拉直
         )
         
         # --- 真值热力图航路点聚类 ---
@@ -261,7 +334,9 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
 if __name__ == "__main__":
     
     DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
-    CKPT_PATH = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\experiments\checkpoints\best_model.pth"
+    CKPT_PATH = r"C:\Users\Administrator\Desktop\experiments\checkpoints\best_model.pth"
+
+
 
     # ==========================================
     # 超参数控制台

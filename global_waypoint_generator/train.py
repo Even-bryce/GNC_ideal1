@@ -14,28 +14,31 @@ from src.models.pointnet_transfomer2.my_model import get_model, get_loss, focal_
 ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
 
 # 1. 实验结果保存路径
-SAVE_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\experiments\checkpoints"
+SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\checkpoints"
 
 # 2. 真实的训练数据路径
 DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
 
 GAMMA = 2 
-TOTAL_EPOCHS = 50         
+TOTAL_EPOCHS = 60         
 # ---------------------      
 # ---------------------
 
 def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
     # --- Warm-up 策略 ---
-    if epoch_idx <= 50:
+    if epoch_idx <= 40:
         criterion.w_straight = 0.0
         criterion.delta_s = 0.00
         criterion.delta_d = 0.00  
         phase_name = "Warm-up (FOCAL Only)"
     else:
-        criterion.w_straight = 2.0
-        criterion.delta_s = 0.8
+        criterion.w_straight = 5.0
+        criterion.w_cost = 0.0
+        criterion.w_safety = 0.1
+        criterion.cost_thresh = 0.7
+        criterion.delta_s = 0.7
         criterion.delta_d = 0.15    
-        phase_name = "Refinement (Geo Loss Active)"
+        phase_name = "Refinement (other Loss Active)"
 
     model.train()
     total_loss = 0.0

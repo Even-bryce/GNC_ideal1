@@ -318,47 +318,90 @@ def connectivity_loss(p, xyz, r_connect=0.05, delta_c=0.1):
     return loss.sum() / denom
 
 
-
+def masked_straight_cost_loss(probs, xyz, start_xyz, goal_xyz, conf_thresh=0.5):
+    """
+    💡 新增：带掩码的直线成本 Loss (只惩罚偏离起终点连线的高分点)
+    """
+    eps = 1e-6
+    
+    # 1. 构造起终点直线向量 v_line
+    v_line = goal_xyz - start_xyz  # [B, 3]
+    line_length = torch.norm(v_line, dim=-1, keepdim=True) + eps  # [B, 1]
+    v_line_norm = v_line / line_length 
+    
+    # 2. 计算点到直线的垂直距离
+    v_points = xyz - start_xyz.unsqueeze(1) # [B, N, 3]
+    v_line_norm_exp = v_line_norm.unsqueeze(1).expand(-1, xyz.size(1), -1) # [B, N, 3]
+    
+    cross_prod = torch.cross(v_points, v_line_norm_exp, dim=-1)
+    dist_to_line = torch.norm(cross_prod, dim=-1) # [B, N]
+    
+    # 3. 生成高分点掩码 (必须 detach 切断梯度)
+    high_score_mask = (probs > conf_thresh).float().detach() # [B, N]
+    
+    # 如果当前 Batch 没有任何高分点，直接返回 0
+    if high_score_mask.sum() < 1.0:
+        return torch.tensor(0.0, device=probs.device, requires_grad=True)
+    
+    # 4. 只针对高分点计算加权距离惩罚
+    masked_cost = high_score_mask * probs * dist_to_line
+    loss_straight = masked_cost.sum() / (high_score_mask.sum() + eps)
+    
+    return loss_straight
 
 class get_loss(nn.Module):
-    def __init__(self, w_bce=1.0, w_straight=3, w_safety=0.2, w_conn=0.0, alpha=0.6, gamma=2.0, delta_s=0.5, delta_d=0.2, r_corridor=0.03, rho=20000.0, alpha2=1.0, M_pair_max=128, r_local=0.05, alpha1=1.0, M_safe_max=256, delta_c=0.1, r_connect=0.05):
+    def __init__(self, w_bce=1.0, w_straight=3, w_safety=0.2, w_conn=0.0, 
+                 w_cost=0.0, cost_thresh=0.5, # <-- 成本 Loss 权重和阈值
+                 alpha=0.6, gamma=2.0, delta_s=0.5, delta_d=0.2, r_corridor=0.03, 
+                 rho=20000.0, alpha2=1.0, M_pair_max=128, r_local=0.05, 
+                 alpha1=1.0, M_safe_max=256, delta_c=0.1, r_connect=0.05):
         super().__init__()
         self.w_bce = w_bce; self.w_straight = w_straight; self.w_safety = w_safety; self.w_conn = w_conn
+        self.w_cost = w_cost; self.cost_thresh = cost_thresh
         self.alpha = alpha; self.gamma = gamma
         self.delta_s = delta_s; self.delta_d = delta_d; self.r_corridor = r_corridor; self.rho = rho; self.alpha2 = alpha2; self.M_pair_max = M_pair_max
         self.r_local = r_local; self.alpha1 = alpha1; self.M_safe_max = M_safe_max
         self.delta_c = delta_c; self.r_connect = r_connect
 
-    def forward(self, logits, targets, xyz, full_points=None):
+    def forward(self, logits, targets, xyz): # <-- 注意：这里不需要 full_points 了！
         if isinstance(logits, (tuple, list)): logits = logits[0]
+        
+        # 提取物理坐标: [B, N, 3]
         if xyz.shape[1] == 8 or xyz.shape[1] == 3: xyz_phys = xyz.permute(0, 2, 1)
         else: xyz_phys = xyz
         xyz_phys = xyz_phys[..., :3]
+        
         p = torch.sigmoid(logits)
         if p.dim() == 3: p = p.squeeze(-1)
         
-        # # --- 【核心拦截器】利用负索引生成 Ignore Mask ---
-        # bce_weights = None
-        # if full_points is not None and full_points.shape[1] >= 6:
-
-        #     f_start = full_points[:, 3, :]
-        #     f_goal  = full_points[:, 4, :]
-            
-        #     # 找出起终点 (特征值趋近于 1.0)
-        #     is_start_end = ((f_start > 0.95) | (f_goal > 0.95)).float()
-            
-        #     # 权重反转：起终点的权重被无情置为 0，其它普通点权重保留为 1
-        #     bce_weights = 1.0 - is_start_end
-
         loss = 0.0
-        # 将拦截器权重传入 focal_loss，起终点不再产生分类梯度！
+        
+        # 1. 基础分类 Loss
         loss += self.w_bce * focal_loss(logits, targets, weights=None, alpha=self.alpha, gamma=self.gamma)
         
-        # 几何 Loss 依然保留起点和终点，因为它们是必须连通的物理锚点
+        # 2. 原有的几何 Loss
         if self.w_straight > 0:
             loss += self.w_straight * straightness_loss(p=p, xyz=xyz_phys, delta_s=self.delta_s, delta_d=self.delta_d, r_corridor=self.r_corridor, rho=self.rho, alpha2=self.alpha2, M_max=self.M_pair_max)
         if self.w_safety > 0:
             loss += self.w_safety * safety_loss(p=p, xyz=xyz_phys, delta_s=self.delta_s, r_local=self.r_local, rho=self.rho, alpha1=self.alpha1, M_max=self.M_safe_max)
         if self.w_conn > 0:
             loss += self.w_conn * connectivity_loss(p=p, xyz=xyz_phys, r_connect=self.r_connect, delta_c=self.delta_c)
+            
+        # ==========================================
+        # 💡 3. 新增：基于起终点连线的成本 Loss (极速版)
+        # ==========================================
+        if self.w_cost > 0:
+            # 感谢你的预处理，这里变成了 O(1) 的极速切片！
+            # xyz_phys[:, 0, :] 就是起点，xyz_phys[:, 1, :] 就是终点
+            start_xyz = xyz_phys[:, 0, :].detach() # [B, 3]
+            goal_xyz  = xyz_phys[:, 1, :].detach() # [B, 3]
+            
+            loss += self.w_cost * masked_straight_cost_loss(
+                probs=p, 
+                xyz=xyz_phys, 
+                start_xyz=start_xyz, 
+                goal_xyz=goal_xyz, 
+                conf_thresh=self.cost_thresh
+            )
+
         return loss

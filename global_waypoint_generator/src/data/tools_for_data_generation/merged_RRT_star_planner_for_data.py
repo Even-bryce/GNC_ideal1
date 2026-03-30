@@ -1677,12 +1677,12 @@ def is_path_meaningful(waypoints, min_angle_deg=15.0):
 
 if __name__ == '__main__':
     # ================= 配置区域 =================
-    NUM_MAPS = 1          # 地图数量
-    TASKS_PER_MAP = 300    # 需要成功保存的有效任务数
+    NUM_MAPS = 10          # 地图数量
+    TASKS_PER_MAP = 200    # 需要成功保存的有效任务数
     BASE_SEED = 39         # 基础随机种子
     
     # 保存路径
-    SAVE_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
+    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
     
     # RRT* 参数
     R_AGENT_CRASH = 1.2
@@ -1784,10 +1784,10 @@ if __name__ == '__main__':
                 sigma1=0.3,
                 sigma2=0.225,
                 eps=1e-8,
-                visualize=True if saved_tasks < 10 else False  # 仅可视化前10个高质量任务
+                visualize=True if saved_tasks < 0 else False  # 仅可视化前10个高质量任务
             )
             
-            if saved_tasks < 10: 
+            if saved_tasks < 0: 
                 plot_tree_and_path_and_waypoints(env_map, planner.node_list, path, straight_waypoints)
             
             # 成功保存一个，计数器加 1
