@@ -17,16 +17,17 @@ ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
 SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\checkpoints"
 
 # 2. 真实的训练数据路径
-DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
+# DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
+DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
 
 GAMMA = 2 
-TOTAL_EPOCHS = 60         
+TOTAL_EPOCHS = 30         
 # ---------------------      
 # ---------------------
 
 def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
     # --- Warm-up 策略 ---
-    if epoch_idx <= 40:
+    if epoch_idx <= 20:
         criterion.w_straight = 0.0
         criterion.delta_s = 0.00
         criterion.delta_d = 0.00  

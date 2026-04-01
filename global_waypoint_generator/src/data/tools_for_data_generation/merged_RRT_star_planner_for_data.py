@@ -1677,8 +1677,8 @@ def is_path_meaningful(waypoints, min_angle_deg=15.0):
 
 if __name__ == '__main__':
     # ================= 配置区域 =================
-    NUM_MAPS = 10          # 地图数量
-    TASKS_PER_MAP = 200    # 需要成功保存的有效任务数
+    NUM_MAPS = 50          # 地图数量
+    TASKS_PER_MAP = 30    # 需要成功保存的有效任务数
     BASE_SEED = 39         # 基础随机种子
     
     # 保存路径
@@ -1706,7 +1706,7 @@ if __name__ == '__main__':
         
         # 1. 生成地图
         env_map = env_generator(
-            rho=0.8, 
+            rho=random.uniform(0.7, 0.9),   # 数据更丰富不容易出现过拟合
             map_dim=(1500, 1500, 240),
             r_crash_range=(30, 50),
             r_risk_range=(3, 7),

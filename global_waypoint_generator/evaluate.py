@@ -195,9 +195,9 @@ def filter_zigzag_waypoints(start_pt, goal_pt, mid_wps, min_dist=0.03, local_thr
         n_out = np.linalg.norm(v_out)
 
         # 规则 1：绝对距离过近 (几乎重叠的冗余点)
-        if n_in < min_dist:
+        if n_in < min_dist or n_out < min_dist:
             path.pop(i)
-            continue 
+            continue
 
         # 规则 2：先看距离，再看角度！(你的核心改进)
         if n_in > 1e-6 and n_out > 1e-6:
@@ -219,8 +219,38 @@ def filter_zigzag_waypoints(start_pt, goal_pt, mid_wps, min_dist=0.03, local_thr
 
     return np.array(path[1:-1])
 
+def calculate_path_length_by_feature(start_pt, goal_pt, mid_wps, scale, center):
+    """
+    利用类似网络特征索引 4 (f_goal) 的几何逻辑，
+    对散乱的中间航路点进行排序，并计算从起点到终点的物理折线距离。
+    """
+    if mid_wps is None or len(mid_wps) == 0:
+        # 如果没有中间点，直接算起点到终点的直线距离
+        path_norm = np.vstack([start_pt, goal_pt])
+    else:
+        # 重新计算类似于“特征索引 4”的 f_goal 值用于排序
+        d_s = np.linalg.norm(mid_wps - start_pt, axis=1)
+        d_g = np.linalg.norm(mid_wps - goal_pt, axis=1)
+        f_goal = d_s / (d_s + d_g + 1e-8)  # 越靠近终点，值越接近 1
+        
+        # 按 f_goal 升序排列 (即从起点顺藤摸瓜到终点)
+        sorted_indices = np.argsort(f_goal)
+        ordered_mid_wps = mid_wps[sorted_indices]
+        
+        # 拼接完整路径: 起点 -> 排序后的中间点 -> 终点
+        path_norm = np.vstack([start_pt, ordered_mid_wps, goal_pt])
+        
+    # 将归一化坐标还原为真实物理坐标 (利用 scale 和 center)
+    path_phys = path_norm * scale + center
+    
+    # 计算相邻点之间的欧氏距离并求和
+    diffs = path_phys[1:] - path_phys[:-1]
+    return np.sum(np.linalg.norm(diffs, axis=1))
+
 @torch.no_grad()
 
+
+@torch.no_grad()
 def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -238,23 +268,33 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
     model.load_state_dict(checkpoint)
     model.eval()
 
-    split = int(len(all_files) * 0)
+    # 如果你想测试整个目录，split可以设为0；如果是验证集划分，按你原来的逻辑保留即可
+    split = int(len(all_files) * 0.8)
     val_files = all_files[split:]
 
     dataset = PathPointDataset(val_files)
     test_loader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
+    # ==========================================
+    # 💡 全局评估累加器
+    # ==========================================
+    total_true_dist = 0.0
+    total_gt_dist = 0.0
+    total_pred_dist = 0.0
+    evaluated_samples = 0
+
+    print(f"🚀 开始批量评估，共计 {len(val_files)} 个样本，请稍候...")
+
     for i, (points, targets, gt_waypoints_list) in enumerate(test_loader):
         points = points.to(device)   
         targets = targets.to(device) 
-
         points_trans = points.permute(0, 2, 1).contiguous() 
 
         output = model(points_trans)
         logits = output[0] if isinstance(output, (tuple, list)) else output
         probs = torch.sigmoid(logits) 
 
-        # 1. 取出当前样本的数据 (都是归一化数据)
+        # 1. 取出当前样本的数据
         xyz_vis = points[0, :, :3]      
         target_vis = targets[0, :, 0]   
         prob_vis = probs[0, :, 0]       
@@ -262,32 +302,26 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
         start_pt = xyz_vis[0].cpu().numpy()
         goal_pt = xyz_vis[1].cpu().numpy()
 
-        # 剔除起终点用于后续聚类预测
         mid_xyz = xyz_vis[2:]
         mid_target = target_vis[2:]
         mid_prob = prob_vis[2:]
 
-        # ==========================================
-        # 💡 新增：处理绝对真实的原始航路点
-        # ==========================================
+        # 2. 获取原始的 True Waypoints (完全真实的航路点)
         raw_wps_phys = gt_waypoints_list[0]
         if isinstance(raw_wps_phys, torch.Tensor):
             raw_wps_phys = raw_wps_phys.cpu().numpy()
             
-        # 归一化真实航路点，以匹配可视化坐标系
         Lx, Ly, Lz = map_dim
         center = 0.5 * np.array([Lx, Ly, Lz])
         scale = max(Lx, Ly, Lz)
         raw_wps_norm = (raw_wps_phys - center) / scale
         
-        # 剔除起终点 (保存时的第0个是起点，最后一个是终点)
         if len(raw_wps_norm) > 2:
             true_mid_wps = raw_wps_norm[1:-1]
         else:
             true_mid_wps = np.empty((0, 3))
 
-
-        # --- 预测航路点聚类 ---
+        # 3. 预测热力图聚类与过滤
         pred_mask = mid_prob > 0.7
         pred_xyz_filtered = mid_xyz[pred_mask].cpu().numpy()
         pred_scores_filtered = mid_prob[pred_mask].cpu().numpy()
@@ -299,12 +333,12 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
 
         pred_mid_waypoints = filter_zigzag_waypoints(
             start_pt, goal_pt, raw_pred_mid_waypoints, 
-            min_dist=0.05,        # 距离阈值，可根据你的尺度微调
-            local_thresh=0.2,   # 局部范围阈值，越大越宽松
-            max_turn_angle=60.0   # 角度阈值，越小越趋近于拉直
+            min_dist=0.05,       
+            local_thresh=0.2,    
+            max_turn_angle=60.0  
         )
         
-        # --- 真值热力图航路点聚类 ---
+        # 4. GT热力图聚类 (仅供对比参考)
         gt_mask = mid_target > 0.9
         gt_xyz_filtered = mid_xyz[gt_mask].cpu().numpy()
         gt_scores_filtered = mid_target[gt_mask].cpu().numpy()
@@ -314,26 +348,170 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
             map_dim=map_dim, eps=cluster_eps, peak_radius=peak_radius
         )
 
-        print(f"\n--- Sample {i} ({os.path.basename(val_files[i])}) ---")
-        print(f"Max Conf: {prob_vis.max().item():.4f}")
-        print(f"Extracted GT Mid Waypoints: {len(gt_mid_waypoints)}")
-        print(f"Extracted Pred Mid Waypoints: {len(pred_mid_waypoints)}")
-        print(f"Raw True Mid Waypoints: {len(true_mid_wps)}")
 
-        # 调用画图
-        visualize_result(
-            xyz_vis, target_vis, prob_vis, 
-            start_pt, goal_pt, gt_mid_waypoints, pred_mid_waypoints, true_mid_wps,
-            threshold=0.5
-        )
+        if i <= 10:
+            # 调用画图
+            visualize_result(
+                xyz_vis, target_vis, prob_vis, 
+                start_pt, goal_pt, gt_mid_waypoints, pred_mid_waypoints, true_mid_wps,
+                threshold=0.5
+            )
 
-        cmd = input("Press Enter for next sample, or 'n' to stop: ")
-        if cmd.lower() == 'n':
-            break
+            cmd = input("Press Enter for next sample, or 'n' to stop: ")
+            if cmd.lower() == 'n':
+                break
+
+        # 5. 计算三种路径的物理距离
+        true_path_dist = calculate_path_length_by_feature(start_pt, goal_pt, true_mid_wps, scale, center)
+        gt_cluster_dist = calculate_path_length_by_feature(start_pt, goal_pt, gt_mid_waypoints, scale, center)
+        pred_cluster_dist = calculate_path_length_by_feature(start_pt, goal_pt, pred_mid_waypoints, scale, center)
+
+        # 累加
+        total_true_dist += true_path_dist
+        total_gt_dist += gt_cluster_dist
+        total_pred_dist += pred_cluster_dist
+        evaluated_samples += 1
+
+        # 可选：打印简单的进度条，防止看着像死机了
+        if (i + 1) % 10 == 0:
+            print(f"  已处理 {i + 1} / {len(val_files)}...")
+
+    # ==========================================
+    # 💡 最终测试集平均结果输出
+    # ==========================================
+    if evaluated_samples > 0:
+        avg_true_dist = total_true_dist / evaluated_samples
+        avg_gt_dist = total_gt_dist / evaluated_samples
+        avg_pred_dist = total_pred_dist / evaluated_samples
+        
+        print("\n" + "="*50)
+        print(f"🏁 测试完成！总共评估了 {evaluated_samples} 个样本")
+        print("="*50)
+        print(f"👑 绝对真值路径 (Raw WPs) 平均长度 : {avg_true_dist:.2f}")
+        print(f"🎯 标签热力图聚类 (GT)   平均长度 : {avg_gt_dist:.2f}")
+        print(f"🤖 模型预测热力图 (Pred) 平均长度 : {avg_pred_dist:.2f}")
+        
+        # 计算一下预测路径相对于真实路径的长度偏差比例
+        if avg_true_dist > 0:
+            diff_ratio = ((avg_pred_dist - avg_true_dist) / avg_true_dist) * 100
+            print("-" * 50)
+            print(f"📈 预测路径相比绝对真值，平均长度偏差: {diff_ratio:+.2f}%")
+        print("="*50 + "\n")
+
+# def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
+#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+#     all_files = sorted(glob.glob(os.path.join(data_dir, "*.npz")))
+#     if len(all_files) == 0:
+#         print(f"Error: 在该目录下找不到 .npz 数据 -> {data_dir}")
+#         return
+
+#     dataset = PathPointDataset(all_files)
+#     sample_points, sample_labels, sample_waypoints = dataset[0]
+#     real_input_dim = sample_points.shape[1]
+
+#     model = get_model(num_classes=1, input_dim=real_input_dim).to(device)
+#     checkpoint = torch.load(model_path, map_location=device)
+#     model.load_state_dict(checkpoint)
+#     model.eval()
+
+#     split = int(len(all_files) * 0)
+#     val_files = all_files[split:]
+
+#     dataset = PathPointDataset(val_files)
+#     test_loader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+
+#     for i, (points, targets, gt_waypoints_list) in enumerate(test_loader):
+#         points = points.to(device)   
+#         targets = targets.to(device) 
+
+#         points_trans = points.permute(0, 2, 1).contiguous() 
+
+#         output = model(points_trans)
+#         logits = output[0] if isinstance(output, (tuple, list)) else output
+#         probs = torch.sigmoid(logits) 
+
+#         # 1. 取出当前样本的数据 (都是归一化数据)
+#         xyz_vis = points[0, :, :3]      
+#         target_vis = targets[0, :, 0]   
+#         prob_vis = probs[0, :, 0]       
+
+#         start_pt = xyz_vis[0].cpu().numpy()
+#         goal_pt = xyz_vis[1].cpu().numpy()
+
+#         # 剔除起终点用于后续聚类预测
+#         mid_xyz = xyz_vis[2:]
+#         mid_target = target_vis[2:]
+#         mid_prob = prob_vis[2:]
+
+#         # ==========================================
+#         # 💡 新增：处理绝对真实的原始航路点
+#         # ==========================================
+#         raw_wps_phys = gt_waypoints_list[0]
+#         if isinstance(raw_wps_phys, torch.Tensor):
+#             raw_wps_phys = raw_wps_phys.cpu().numpy()
+            
+#         # 归一化真实航路点，以匹配可视化坐标系
+#         Lx, Ly, Lz = map_dim
+#         center = 0.5 * np.array([Lx, Ly, Lz])
+#         scale = max(Lx, Ly, Lz)
+#         raw_wps_norm = (raw_wps_phys - center) / scale
+        
+#         # 剔除起终点 (保存时的第0个是起点，最后一个是终点)
+#         if len(raw_wps_norm) > 2:
+#             true_mid_wps = raw_wps_norm[1:-1]
+#         else:
+#             true_mid_wps = np.empty((0, 3))
+
+
+#         # --- 预测航路点聚类 ---
+#         pred_mask = mid_prob > 0.7
+#         pred_xyz_filtered = mid_xyz[pred_mask].cpu().numpy()
+#         pred_scores_filtered = mid_prob[pred_mask].cpu().numpy()
+        
+#         raw_pred_mid_waypoints = extract_waypoints(
+#             pred_xyz_filtered, pred_scores_filtered, 
+#             map_dim=map_dim, eps=cluster_eps, peak_radius=peak_radius
+#         )
+
+#         pred_mid_waypoints = filter_zigzag_waypoints(
+#             start_pt, goal_pt, raw_pred_mid_waypoints, 
+#             min_dist=0.05,        # 距离阈值，可根据你的尺度微调
+#             local_thresh=0.2,   # 局部范围阈值，越大越宽松
+#             max_turn_angle=60.0   # 角度阈值，越小越趋近于拉直
+#         )
+        
+#         # --- 真值热力图航路点聚类 ---
+#         gt_mask = mid_target > 0.9
+#         gt_xyz_filtered = mid_xyz[gt_mask].cpu().numpy()
+#         gt_scores_filtered = mid_target[gt_mask].cpu().numpy()
+        
+#         gt_mid_waypoints = extract_waypoints(
+#             gt_xyz_filtered, gt_scores_filtered, 
+#             map_dim=map_dim, eps=cluster_eps, peak_radius=peak_radius
+#         )
+
+#         print(f"\n--- Sample {i} ({os.path.basename(val_files[i])}) ---")
+#         print(f"Max Conf: {prob_vis.max().item():.4f}")
+#         print(f"Extracted GT Mid Waypoints: {len(gt_mid_waypoints)}")
+#         print(f"Extracted Pred Mid Waypoints: {len(pred_mid_waypoints)}")
+#         print(f"Raw True Mid Waypoints: {len(true_mid_wps)}")
+
+#         # 调用画图
+#         visualize_result(
+#             xyz_vis, target_vis, prob_vis, 
+#             start_pt, goal_pt, gt_mid_waypoints, pred_mid_waypoints, true_mid_wps,
+#             threshold=0.5
+#         )
+
+#         cmd = input("Press Enter for next sample, or 'n' to stop: ")
+#         if cmd.lower() == 'n':
+#             break
 
 if __name__ == "__main__":
     
-    DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
+    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
+    # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
     CKPT_PATH = r"C:\Users\Administrator\Desktop\experiments\checkpoints\best_model.pth"
 
 

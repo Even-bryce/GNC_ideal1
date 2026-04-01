@@ -11,7 +11,7 @@ from src.models.pointnet_transfomer2.lib.pointops.functions import pointops
 # ==========================================
 
 class PointTransformerLayer(nn.Module):
-    def __init__(self, in_planes, out_planes, share_planes=8, nsample=16):
+    def __init__(self, in_planes, out_planes, share_planes=4, nsample=16):
         super().__init__()
         self.mid_planes = mid_planes = out_planes // 1
         self.out_planes = out_planes
@@ -71,19 +71,197 @@ class TransitionDown(nn.Module):
             x = self.relu(self.bn(self.linear(x)))  # (n, c)
         return [p, x, o]
 
+# class TransitionUp(nn.Module):
+#     def __init__(self, in_planes, out_planes=None):
+#         super().__init__()
+#         if out_planes is None:
+#             self.linear1 = nn.Sequential(nn.Linear(2*in_planes, in_planes), nn.BatchNorm1d(in_planes), nn.ReLU(inplace=True))
+#             self.linear2 = nn.Sequential(nn.Linear(in_planes, in_planes), nn.ReLU(inplace=True))
+#         else:
+#             self.linear1 = nn.Sequential(nn.Linear(out_planes, out_planes), nn.BatchNorm1d(out_planes), nn.ReLU(inplace=True))
+#             self.linear2 = nn.Sequential(nn.Linear(in_planes, out_planes), nn.BatchNorm1d(out_planes), nn.ReLU(inplace=True))
+        
+#     def forward(self, pxo1, pxo2=None):
+#         if pxo2 is None:
+#             _, x, o = pxo1  # (n, 3), (n, c), (b)
+#             x_tmp = []
+#             for i in range(o.shape[0]):
+#                 if i == 0:
+#                     s_i, e_i, cnt = 0, o[0], o[0]
+#                 else:
+#                     s_i, e_i, cnt = o[i-1], o[i], o[i] - o[i-1]
+#                 x_b = x[s_i:e_i, :]
+#                 x_b = torch.cat((x_b, self.linear2(x_b.sum(0, True) / cnt).repeat(cnt, 1)), 1)
+#                 x_tmp.append(x_b)
+#             x = torch.cat(x_tmp, 0)
+#             x = self.linear1(x)
+#         else:
+#             p1, x1, o1 = pxo1; p2, x2, o2 = pxo2
+#             x = self.linear1(x1) + pointops.interpolation(p2, p1, self.linear2(x2), o2, o1)
+#         return x
+
+# class TransitionUp(nn.Module):
+
+#     def __init__(self, in_planes, out_planes=None, nsample=8):
+#         super().__init__()
+#         # 这里的 nsample=3 对应原版插值找 3 个最近邻，你也可以调成 8 来获得更大的感受野
+#         self.nsample = nsample
+
+#         if out_planes is None:
+#             self.linear1 = nn.Sequential(nn.Linear(2*in_planes, in_planes), nn.BatchNorm1d(in_planes), nn.ReLU(inplace=True))
+#             self.linear2 = nn.Sequential(nn.Linear(in_planes, in_planes), nn.ReLU(inplace=True))
+#         else:
+#             self.linear1 = nn.Sequential(nn.Linear(out_planes, out_planes), nn.BatchNorm1d(out_planes), nn.ReLU(inplace=True))
+#             self.linear2 = nn.Sequential(nn.Linear(in_planes, out_planes), nn.BatchNorm1d(out_planes), nn.ReLU(inplace=True))
+
+#             # ==========================================
+#             # 💡 彻底重构：基于语义和位置的 Local Cross Attention Upsampling
+#             # ==========================================
+#             # 1. 特征映射：Q (来自解码器底层特征 x1), K/V (来自编码器稀疏高层特征 x2)
+#             self.linear_q = nn.Linear(out_planes, out_planes)
+#             self.linear_k = nn.Linear(out_planes, out_planes)
+#             self.linear_v = nn.Linear(out_planes, out_planes)
+
+#             # 2. 相对位置编码 (把三维物理距离转化为特征向量)
+#             self.linear_p = nn.Sequential(
+#                 nn.Linear(3, 3),
+#                 nn.BatchNorm1d(3),
+#                 nn.ReLU(inplace=True),
+#                 nn.Linear(3, out_planes)
+#             )
+#             # 3. 权重生成 MLP (用来融合 语义差异 Q-K 和 物理距离 PE)
+#             self.linear_w = nn.Sequential(
+#                 nn.BatchNorm1d(out_planes),
+#                 nn.ReLU(inplace=True),
+#                 nn.Linear(out_planes, out_planes // 4),
+#                 nn.BatchNorm1d(out_planes // 4),
+#                 nn.ReLU(inplace=True),
+#                 nn.Linear(out_planes // 4, out_planes)
+#             )
+#             self.softmax = nn.Softmax(dim=1)
+#
+#     def forward(self, pxo1, pxo2=None):
+#         if pxo2 is None:
+#             # 最深层的处理逻辑 (保留原样)
+#             _, x, o = pxo1
+#             x_tmp = []
+#             for i in range(o.shape[0]):
+#                 if i == 0:
+#                     s_i, e_i, cnt = 0, o[0], o[0]
+#                 else:
+#                     s_i, e_i, cnt = o[i-1], o[i], o[i] - o[i-1]
+#                 x_b = x[s_i:e_i, :]
+#                 x_b = torch.cat((x_b, self.linear2(x_b.sum(0, True) / cnt).repeat(cnt, 1)), 1)
+#                 x_tmp.append(x_b)
+#             x = torch.cat(x_tmp, 0)
+#             x = self.linear1(x)
+#         else:
+#             # pxo1: Encoder 特征 (密集, 包含丰富局部细节, N1个点)
+#             # pxo2: Decoder 特征 (稀疏, 包含宏观语义骨架, N2个点)
+#             p1, x1, o1 = pxo1
+#             p2, x2, o2 = pxo2
+#             x1_proj = self.linear1(x1)  # (N1, C)
+#             x2_proj = self.linear2(x2)  # (N2, C)
+#             if hasattr(self, 'linear_q'):
+#                 # ==========================================
+#                 # 💡 核心过程：用 Query&Group 替代物理插值
+#                 # ==========================================
+#                 # 1. 找邻居：拿着密集点(p1)去稀疏点(p2)里找 nsample 个最近邻
+#                 # group_features 维度: (N1, nsample, 3 + C) -> 前3个通道是相对物理坐标
+#                 group_features = pointops.queryandgroup(self.nsample, p2, p1, x2_proj, None, o2, o1, use_xyz=True)
+
+#                 # 分离出 相对物理坐标 (p_r) 和 邻居的语义特征 (x_k)
+#                 p_r = group_features[:, :, 0:3]  # (N1, nsample, 3)
+#                 x_k_sparse = group_features[:, :, 3:]   # (N1, nsample, C)
+
+#                 # 2. 生成 Query, Key, Value
+#                 q = self.linear_q(x1_proj).unsqueeze(1) # (N1, 1, C)
+#                 k = self.linear_k(x_k_sparse)           # (N1, nsample, C)
+#                 v = self.linear_v(x_k_sparse)           # (N1, nsample, C)
+
+#                 # 3. 处理相对位置编码
+#                 # 把 (N1, nsample, 3) 压平过 MLP 再变回来
+#                 pe = p_r.view(-1, 3)
+#                 for i, layer in enumerate(self.linear_p):
+#                     pe = layer(pe)
+#                 pe = pe.view(p_r.shape[0], p_r.shape[1], -1) # (N1, nsample, C)
+               
+#                 # 4. 计算融合了 语义(q-k) 和 空间距离(pe) 的 Attention 权重
+#                 w = q - k + pe  # (N1, nsample, C)
+               
+#                 # 过权重生成网络
+#                 w_flat = w.view(-1, w.shape[-1])
+#                 for i, layer in enumerate(self.linear_w):
+#                     w_flat = layer(w_flat)
+
+#                 w = w_flat.view(w.shape[0], w.shape[1], -1)
+#                 # 在 nsample (即候选邻居) 维度上做 Softmax 归一化
+#                 attn_weight = self.softmax(w) # (N1, nsample, C)
+
+#                 # 5. 特征聚合：按权重吸收邻居的特征 (Value) 和 位置编码 (PE)
+#                 x2_interp = (attn_weight * (v + pe)).sum(dim=1) # (N1, C)
+               
+#                 # 6. Skip Connection 融合
+#                 x = x1_proj + x2_interp
+             
+#             else:
+#                 # 兼容原始插值
+#                 x2_interp = pointops.interpolation(p2, p1, x2_proj, o2, o1)
+#                 x = x1_proj + x2_interp
+#         return x
+    
+
 class TransitionUp(nn.Module):
-    def __init__(self, in_planes, out_planes=None):
+    def __init__(self, in_planes, out_planes=None, nsample=4):
         super().__init__()
+        self.nsample = nsample 
+        
         if out_planes is None:
             self.linear1 = nn.Sequential(nn.Linear(2*in_planes, in_planes), nn.BatchNorm1d(in_planes), nn.ReLU(inplace=True))
             self.linear2 = nn.Sequential(nn.Linear(in_planes, in_planes), nn.ReLU(inplace=True))
         else:
             self.linear1 = nn.Sequential(nn.Linear(out_planes, out_planes), nn.BatchNorm1d(out_planes), nn.ReLU(inplace=True))
             self.linear2 = nn.Sequential(nn.Linear(in_planes, out_planes), nn.BatchNorm1d(out_planes), nn.ReLU(inplace=True))
-        
+            
+            # ==========================================
+            # 💡 机制一：上采样 Local Cross Attention (1-to-N, 找邻居)
+            # ==========================================
+            self.up_q = nn.Linear(out_planes, out_planes)
+            self.up_k = nn.Linear(out_planes, out_planes)
+            self.up_v = nn.Linear(out_planes, out_planes)
+            
+            self.up_p = nn.Sequential(
+                nn.Linear(3, 3), nn.BatchNorm1d(3), nn.ReLU(inplace=True), nn.Linear(3, out_planes)
+            )
+            self.up_w = nn.Sequential(
+                nn.BatchNorm1d(out_planes), nn.ReLU(inplace=True),
+                nn.Linear(out_planes, out_planes // 4), nn.BatchNorm1d(out_planes // 4), nn.ReLU(inplace=True),
+                nn.Linear(out_planes // 4, out_planes)
+            )
+            self.up_softmax = nn.Softmax(dim=1)
+            
+            # ==========================================
+            # 💡 机制二：Skip Connection Cross Attention (1-to-1, 门控过滤)
+            # ==========================================
+            # 专门为跳跃连接准备的独立映射层
+            self.skip_q = nn.Linear(out_planes, out_planes)
+            self.skip_k = nn.Linear(out_planes, out_planes)
+            self.skip_v = nn.Linear(out_planes, out_planes)
+            
+            # 门控权重生成网络 (最后使用 Sigmoid 将特征压到 0~1 之间)
+            self.skip_w = nn.Sequential(
+                nn.Linear(out_planes, out_planes // 4),
+                nn.BatchNorm1d(out_planes // 4),
+                nn.ReLU(inplace=True),
+                nn.Linear(out_planes // 4, out_planes),
+                nn.Sigmoid() 
+            )
+            # ==========================================
+            
     def forward(self, pxo1, pxo2=None):
         if pxo2 is None:
-            _, x, o = pxo1  # (n, 3), (n, c), (b)
+            # 最深层的处理逻辑 (保留原样)
+            _, x, o = pxo1
             x_tmp = []
             for i in range(o.shape[0]):
                 if i == 0:
@@ -96,9 +274,61 @@ class TransitionUp(nn.Module):
             x = torch.cat(x_tmp, 0)
             x = self.linear1(x)
         else:
-            p1, x1, o1 = pxo1; p2, x2, o2 = pxo2
-            x = self.linear1(x1) + pointops.interpolation(p2, p1, self.linear2(x2), o2, o1)
+            p1, x1, o1 = pxo1
+            p2, x2, o2 = pxo2
+            
+            x1_proj = self.linear1(x1)  # (N1, C)
+            x2_proj = self.linear2(x2)  # (N2, C)
+            
+            if hasattr(self, 'up_q'):
+                # --------------------------------------------------
+                # 阶段一：基于语义和距离的上采样 (Upsampling)
+                # --------------------------------------------------
+                group_features = pointops.queryandgroup(self.nsample, p2, p1, x2_proj, None, o2, o1, use_xyz=True)
+                
+                p_r = group_features[:, :, 0:3]         # (N1, nsample, 3)
+                x_k_sparse = group_features[:, :, 3:]   # (N1, nsample, C)
+                
+                q_up = self.up_q(x1_proj).unsqueeze(1)  # (N1, 1, C)
+                k_up = self.up_k(x_k_sparse)            # (N1, nsample, C)
+                v_up = self.up_v(x_k_sparse)            # (N1, nsample, C)
+                
+                pe = p_r.view(-1, 3)
+                for layer in self.up_p: pe = layer(pe)
+                pe = pe.view(p_r.shape[0], p_r.shape[1], -1)
+                
+                w_up = q_up - k_up + pe
+                w_up_flat = w_up.view(-1, w_up.shape[-1])
+                for layer in self.up_w: w_up_flat = layer(w_up_flat)
+                w_up = w_up_flat.view(w_up.shape[0], w_up.shape[1], -1)
+                
+                attn_weight_up = self.up_softmax(w_up) 
+                
+                # 获得上采样后的高层语义特征
+                x2_interp = (attn_weight_up * (v_up + pe)).sum(dim=1) # (N1, C)
+                
+                # --------------------------------------------------
+                # 阶段二：Skip Connection 的 1对1 Cross Attention
+                # --------------------------------------------------
+                # Query: 刚刚融合好的高层宏观语义 (来自阶段一的输出)
+                q_skip = self.skip_q(x2_interp)
+                
+                # Key/Value: 当前点在编码器中提取的底层微观几何特征
+                k_skip = self.skip_k(x1_proj)
+                v_skip = self.skip_v(x1_proj)
+                
+                # 计算门控权重 (Q - K 经过 MLP 和 Sigmoid)
+                attn_weight_skip = self.skip_w(q_skip - k_skip) # (N1, C) 范围在 (0, 1) 之间
+                
+                # 最终融合：宏观语义作为主体，吸收被门控过滤后的底层微观特征
+                x = x2_interp + attn_weight_skip * v_skip
+                
+            else:
+                x2_interp = pointops.interpolation(p2, p1, x2_proj, o2, o1)
+                x = x1_proj + x2_interp
+                
         return x
+
 
 class PointTransformerBlock(nn.Module):
     expansion = 1
