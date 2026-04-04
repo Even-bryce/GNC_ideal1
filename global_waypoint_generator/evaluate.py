@@ -510,8 +510,8 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
 
 if __name__ == "__main__":
     
-    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
-    # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
+    # DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
+    DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
     CKPT_PATH = r"C:\Users\Administrator\Desktop\experiments\checkpoints\best_model.pth"
 
 

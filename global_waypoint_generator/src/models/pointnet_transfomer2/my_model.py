@@ -478,26 +478,35 @@ def focal_loss(logits, targets, weights=None, alpha=0.9, gamma=2.0):
         loss = loss * weights
     return loss.mean()
 
-def straightness_loss(p, xyz, delta_s=0.5, delta_d=0.2, r_corridor=0.03, rho=20000.0, alpha2=1.0, eps=1e-6, M_max=128):
+def straightness_loss(p, xyz, delta_s=0.5, delta_d=0.2, r_corridor=0.03, rho=20000.0, alpha2=1.0, eps=1e-6, M_max=128, K=2):
     B, N, _ = xyz.shape
     device = xyz.device
     total_loss = []
+    
     for b in range(B):
         mask = p[b] > delta_s
         idx = torch.nonzero(mask, as_tuple=False).squeeze(-1)
-        if idx.numel() < 2: continue
+        
+        # ⚠️ 必须至少有 K+1 个高分点，才能保证一个点能找到 K 个邻居
+        if idx.numel() <= K: continue 
+        
         if idx.numel() > M_max:
-            topk = torch.topk(p[b, idx], M_max).indices
-            idx = idx[topk]
+            topk_idx = torch.topk(p[b, idx], M_max).indices
+            idx = idx[topk_idx]
+            
         xb = xyz[b, idx]
         pb = p[b, idx]
+        
         M = xb.shape[0]
         dist_ij = torch.cdist(xb, xb)
         valid_pair_mask = (dist_ij > delta_d).float()
-        num_valid_pairs = valid_pair_mask.sum()
-        if num_valid_pairs < 1: continue
+        
+        # 如果整张图连一对合法的都没有，直接跳过
+        if valid_pair_mask.sum() < 1: continue
+        
         xi, xj = xb.unsqueeze(1), xb.unsqueeze(0)
         xk = xb.unsqueeze(0).unsqueeze(0)
+        
         v = xj - xi
         vv = (v ** 2).sum(-1, keepdim=True) + eps
         w = xk - xi.unsqueeze(1)
@@ -505,21 +514,62 @@ def straightness_loss(p, xyz, delta_s=0.5, delta_d=0.2, r_corridor=0.03, rho=200
         t = torch.clamp(t, 0.0, 1.0)
         proj = xi.unsqueeze(1) + t * v.unsqueeze(1)
         d_k_to_seg = torch.norm(xk - proj, dim=-1)
+        
         N_ij = (d_k_to_seg <= r_corridor).sum(dim=-1).float()
         V_corridor = math.pi * r_corridor ** 2 * dist_ij
         N_corridor_max = rho * V_corridor + eps
+        
         p_i, p_j = pb.unsqueeze(1), pb.unsqueeze(0)
-        phi_s = torch.exp(-alpha2 * N_ij / N_corridor_max)
-        loss_mat = -1 * p_i * p_j * phi_s
-        loss_b = (loss_mat * valid_pair_mask).sum() / (num_valid_pairs + eps)
+        
+        # --- 截断与通畅度计算 ---
+        ratio = N_ij / N_corridor_max
+        ratio = torch.clamp(ratio, min=0.0, max=1.0)
+        phi_s = torch.exp(alpha2 * (ratio - 1.0))
+        
+        # ==========================================
+        # --- 新的 TOP-K 核心逻辑 (完全映射截图公式) ---
+        # ==========================================
+        
+        # 1. 计算寻找集合 Si 的内部打分矩阵: (p_j * phi_s(i, j))
+        search_score_mat = p_j * phi_s * valid_pair_mask
+        
+        # 2. 统计每个点周围合法的目标数量
+        valid_targets_per_point = valid_pair_mask.sum(dim=1)
+        
+        # 3. 找出满足 "周围至少有 K 个目标" 的合法起点 (用作公式的分母 M_2)
+        has_enough_targets = (valid_targets_per_point >= K).float()
+        M_2 = has_enough_targets.sum()
+        
+        # 如果没有任何一个点能凑齐 K 个邻居，跳过该 batch
+        if M_2 < 1: 
+            continue
+            
+        # 4. 执行 TOP-K 提取，返回的 topk_values 形状为 [M, K]
+        topk_values = search_score_mat.topk(k=K, dim=1).values
+        
+        # 5. 对选出的 K 个值求平均: mean_{j \in S_i}(...)
+        # 形状变为 [M]
+        mean_topk_vals = topk_values.mean(dim=1)
+        
+        # 6. 外层乘上 -p_i，得到一维的损失数组
+        # p_i 原本是 [M, 1]，通过 squeeze(1) 变成 [M] 以对齐维度
+        loss_mat_1d = -1.0 * p_i.squeeze(1) * mean_topk_vals
+        
+        # 7. 求和并除以 M_2
+        loss_b = (loss_mat_1d * has_enough_targets).sum() / (M_2 + eps)
+        
         total_loss.append(loss_b)
-    if len(total_loss) == 0: return torch.tensor(0.0, device=device, requires_grad=True)
+        
+    if len(total_loss) == 0: 
+        return torch.tensor(0.0, device=device, requires_grad=True)
+        
     return torch.stack(total_loss).mean()
 
 def safety_loss(p, xyz, delta_s=0.5, r_local=0.05, rho=20000.0, alpha1=1.0, eps=1e-6, M_max=128):
     B, N, _ = xyz.shape
     device = xyz.device
     losses = []
+    
     for b in range(B):
         mask = p[b] > delta_s
         idx = torch.nonzero(mask, as_tuple=False).squeeze(-1)
@@ -527,15 +577,35 @@ def safety_loss(p, xyz, delta_s=0.5, r_local=0.05, rho=20000.0, alpha1=1.0, eps=
         if idx.numel() > M_max:
             topk = torch.topk(p[b, idx], M_max).indices
             idx = idx[topk]
+            
         xb = xyz[b, idx]
         pb = p[b, idx]
-        dist = torch.cdist(xb, xb)
+        
+        # ⚠️ 重要修正：计算 xb 中的高分点到【当前 batch 所有点云 xyz[b]】的距离
+        # 而不是仅仅算 xb 到 xb 的距离。因为我们要统计的是真实环境的局部密度。
+        dist = torch.cdist(xb, xyz[b]) 
+        
         N_i = (dist <= r_local).sum(dim=-1).float()
         V_local = 4.0 / 3.0 * math.pi * r_local ** 3
         N_local_max = rho * V_local + eps
-        e_i = torch.exp(-alpha1 * N_i / N_local_max)
-        losses.append((pb * e_i).mean())
-    if len(losses) == 0: return torch.tensor(0.0, device=device)
+        
+        # --- 核心修改逻辑 ---
+        # 1. 计算比例
+        ratio = N_i / N_local_max
+        # 2. 加入截断，限制在 [0.0, 1.0]
+        ratio = torch.clamp(ratio, min=0.0, max=1.0)
+        # 3. 使用新公式，没有负号
+        e_i = torch.exp(alpha1 * (ratio - 1.0))
+        # --------------------
+        
+        # ⚠️ 重要修正：补充公式里的负号，指导优化器最大化这个得分
+        loss_b = -1.0 * (pb * e_i).mean()
+        losses.append(loss_b)
+        
+    if len(losses) == 0: 
+        # 加上 requires_grad=True 防止极端情况下全被过滤导致反向传播报错
+        return torch.tensor(0.0, device=device, requires_grad=True) 
+        
     return torch.stack(losses).mean()
 
 def connectivity_loss(p, xyz, r_connect=0.05, delta_c=0.1):
@@ -549,48 +619,97 @@ def connectivity_loss(p, xyz, r_connect=0.05, delta_c=0.1):
     return loss.sum() / denom
 
 
-def masked_straight_cost_loss(probs, xyz, start_xyz, goal_xyz, conf_thresh=0.5):
-    """
-    💡 新增：带掩码的直线成本 Loss (只惩罚偏离起终点连线的高分点)
-    """
-    eps = 1e-6
+def cost_loss(p, xyz, delta_s=0.5, delta_d=0.2, r_corridor=0.03, rho=20000.0, alpha2=1.0, eps=1e-6, M_max=128, K=2):
+    B, N, _ = xyz.shape
+    device = xyz.device
+    total_loss = []
     
-    # 1. 构造起终点直线向量 v_line
-    v_line = goal_xyz - start_xyz  # [B, 3]
-    line_length = torch.norm(v_line, dim=-1, keepdim=True) + eps  # [B, 1]
-    v_line_norm = v_line / line_length 
-    
-    # 2. 计算点到直线的垂直距离
-    v_points = xyz - start_xyz.unsqueeze(1) # [B, N, 3]
-    v_line_norm_exp = v_line_norm.unsqueeze(1).expand(-1, xyz.size(1), -1) # [B, N, 3]
-    
-    cross_prod = torch.cross(v_points, v_line_norm_exp, dim=-1)
-    dist_to_line = torch.norm(cross_prod, dim=-1) # [B, N]
-    
-    # 3. 生成高分点掩码 (必须 detach 切断梯度)
-    high_score_mask = (probs > conf_thresh).float().detach() # [B, N]
-    
-    # 如果当前 Batch 没有任何高分点，直接返回 0
-    if high_score_mask.sum() < 1.0:
-        return torch.tensor(0.0, device=probs.device, requires_grad=True)
-    
-    # 4. 只针对高分点计算加权距离惩罚
-    masked_cost = high_score_mask * probs * dist_to_line
-    loss_straight = masked_cost.sum() / (high_score_mask.sum() + eps)
-    
-    return loss_straight
+    for b in range(B):
+        mask = p[b] > delta_s
+        idx = torch.nonzero(mask, as_tuple=False).squeeze(-1)
+        if idx.numel() <= K: continue 
+        
+        if idx.numel() > M_max:
+            topk_idx = torch.topk(p[b, idx], M_max).indices
+            idx = idx[topk_idx]
+            
+        xb = xyz[b, idx]
+        pb = p[b, idx]
+        
+        M = xb.shape[0]
+        dist_ij = torch.cdist(xb, xb)
+        valid_pair_mask = (dist_ij > delta_d).float()
+        
+        if valid_pair_mask.sum() < 1: continue
+        
+        xi, xj = xb.unsqueeze(1), xb.unsqueeze(0)
+        xk = xb.unsqueeze(0).unsqueeze(0)
+        
+        # Initial logic and parameters are validated. Standard processing applied for spatial relationships.
+        v = xj - xi
+        vv = (v ** 2).sum(-1, keepdim=True) + eps
+        w = xk - xi.unsqueeze(1)
+        t = (w * v.unsqueeze(1)).sum(-1, keepdim=True) / vv.unsqueeze(1)
+        t = torch.clamp(t, 0.0, 1.0)
+        proj = xi.unsqueeze(1) + t * v.unsqueeze(1)
+        d_k_to_seg = torch.norm(xk - proj, dim=-1)
+        
+        N_ij = (d_k_to_seg <= r_corridor).sum(dim=-1).float()
+        V_corridor = math.pi * r_corridor ** 2 * dist_ij
+        N_corridor_max = rho * V_corridor + eps
+        
+        ratio = torch.clamp(N_ij / N_corridor_max, min=0.0, max=1.0)
+        phi_s = torch.exp(alpha2 * (ratio - 1.0))
+        
+        p_i, p_j = pb.unsqueeze(1), pb.unsqueeze(0)
+        
+        # ==========================================
+        # S_i Extraction and Cost Evaluation
+        # ==========================================
+        
+        search_score_mat = p_j * phi_s * valid_pair_mask
+        valid_targets_per_point = valid_pair_mask.sum(dim=1)
+        has_enough_targets = (valid_targets_per_point >= K).float()
+        M_2 = has_enough_targets.sum()
+        
+        if M_2 < 1: 
+            continue
+            
+        # Top-K indices to form set S_i
+        topk_indices = search_score_mat.topk(k=K, dim=1).indices
+        
+        # Gather p_j and d_ij specific to S_i
+        chosen_pj = torch.gather(p_j.expand(M, M), 1, topk_indices)
+        chosen_dists = torch.gather(dist_ij, 1, topk_indices)
+        
+        # Calculate the internal metric: p_j * (delta_d / d_ij)
+        cost_metric = chosen_pj * (delta_d / (chosen_dists + eps))
+        
+        # Mean across the K targets
+        mean_cost = cost_metric.mean(dim=1)
+        
+        # Multiply by -p_i
+        loss_mat_1d = -1.0 * p_i.squeeze(1) * mean_cost
+        
+        loss_b = (loss_mat_1d * has_enough_targets).sum() / (M_2 + eps)
+        total_loss.append(loss_b)
+        
+    if len(total_loss) == 0: 
+        return torch.tensor(0.0, device=device, requires_grad=True)
+        
+    return torch.stack(total_loss).mean()
 
 class get_loss(nn.Module):
     def __init__(self, w_bce=1.0, w_straight=3, w_safety=0.2, w_conn=0.0, 
-                 w_cost=0.0, cost_thresh=0.5, # <-- 成本 Loss 权重和阈值
-                 alpha=0.6, gamma=2.0, delta_s=0.5, delta_d=0.2, r_corridor=0.03, 
+                 w_cost=0.0,
+                 alpha=0.6, gamma=2.0, delta_s=0.5, delta_d=0.2, K=2, r_corridor=0.03, 
                  rho=20000.0, alpha2=1.0, M_pair_max=128, r_local=0.05, 
                  alpha1=1.0, M_safe_max=256, delta_c=0.1, r_connect=0.05):
         super().__init__()
         self.w_bce = w_bce; self.w_straight = w_straight; self.w_safety = w_safety; self.w_conn = w_conn
-        self.w_cost = w_cost; self.cost_thresh = cost_thresh
+        self.w_cost = w_cost; 
         self.alpha = alpha; self.gamma = gamma
-        self.delta_s = delta_s; self.delta_d = delta_d; self.r_corridor = r_corridor; self.rho = rho; self.alpha2 = alpha2; self.M_pair_max = M_pair_max
+        self.delta_s = delta_s; self.K = K;self.delta_d = delta_d; self.r_corridor = r_corridor; self.rho = rho; self.alpha2 = alpha2; self.M_pair_max = M_pair_max
         self.r_local = r_local; self.alpha1 = alpha1; self.M_safe_max = M_safe_max
         self.delta_c = delta_c; self.r_connect = r_connect
 
@@ -610,29 +729,14 @@ class get_loss(nn.Module):
         # 1. 基础分类 Loss
         loss += self.w_bce * focal_loss(logits, targets, weights=None, alpha=self.alpha, gamma=self.gamma)
         
-        # 2. 原有的几何 Loss
+        # 2. 其他Loss
         if self.w_straight > 0:
-            loss += self.w_straight * straightness_loss(p=p, xyz=xyz_phys, delta_s=self.delta_s, delta_d=self.delta_d, r_corridor=self.r_corridor, rho=self.rho, alpha2=self.alpha2, M_max=self.M_pair_max)
+            loss += self.w_straight * straightness_loss(p=p, xyz=xyz_phys, delta_s=self.delta_s, delta_d=self.delta_d, r_corridor=self.r_corridor, rho=self.rho, alpha2=self.alpha2, M_max=self.M_pair_max, K=self.K)
         if self.w_safety > 0:
             loss += self.w_safety * safety_loss(p=p, xyz=xyz_phys, delta_s=self.delta_s, r_local=self.r_local, rho=self.rho, alpha1=self.alpha1, M_max=self.M_safe_max)
         if self.w_conn > 0:
             loss += self.w_conn * connectivity_loss(p=p, xyz=xyz_phys, r_connect=self.r_connect, delta_c=self.delta_c)
-            
-        # ==========================================
-        # 💡 3. 新增：基于起终点连线的成本 Loss (极速版)
-        # ==========================================
         if self.w_cost > 0:
-            # 感谢你的预处理，这里变成了 O(1) 的极速切片！
-            # xyz_phys[:, 0, :] 就是起点，xyz_phys[:, 1, :] 就是终点
-            start_xyz = xyz_phys[:, 0, :].detach() # [B, 3]
-            goal_xyz  = xyz_phys[:, 1, :].detach() # [B, 3]
-            
-            loss += self.w_cost * masked_straight_cost_loss(
-                probs=p, 
-                xyz=xyz_phys, 
-                start_xyz=start_xyz, 
-                goal_xyz=goal_xyz, 
-                conf_thresh=self.cost_thresh
-            )
+            loss += self.w_cost * cost_loss(p=p, xyz=xyz_phys, delta_s=self.delta_s, delta_d=self.delta_d, r_corridor=self.r_corridor, rho=self.rho, alpha2=self.alpha2, M_max=self.M_pair_max, K=self.K)
 
         return loss

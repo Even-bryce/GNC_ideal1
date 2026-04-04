@@ -17,10 +17,11 @@ ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
 SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\checkpoints"
 
 # 2. 真实的训练数据路径
-# DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
-DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
+DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
+# DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
 
-GAMMA = 2 
+GAMMA = 2.0
+ALPHA = 0.6
 TOTAL_EPOCHS = 60         
 # ---------------------      
 # ---------------------
@@ -28,17 +29,19 @@ TOTAL_EPOCHS = 60
 def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
     # --- Warm-up 策略 ---
     if epoch_idx <= 40:
+        criterion.w_bce = 20
         criterion.w_straight = 0.0
-        criterion.delta_s = 0.00
-        criterion.delta_d = 0.00  
+        criterion.w_cost = 0.0
+        criterion.w_safety = 0.0  
         phase_name = "Warm-up (FOCAL Only)"
     else:
-        criterion.w_straight = 6
-        criterion.w_cost = 0.0
-        criterion.w_safety = 0.1
-        criterion.cost_thresh = 0.7
+        criterion.w_straight = 2
+        criterion.w_cost = 1
+        criterion.w_safety = 0.5
         criterion.delta_s = 0.7
-        criterion.delta_d = 0.15    
+        criterion.delta_d = 0.3
+        criterion.K = 2
+        criterion.M_pair_max = 128
         phase_name = "Refinement (other Loss Active)"
 
     model.train()
@@ -251,6 +254,8 @@ def main():
         w_straight=0,
         w_safety=0,
         w_conn=0.0,
+        w_cost=0.0,
+        alpha=ALPHA,
         gamma=GAMMA,
         delta_s=0.5,
         r_corridor=0.03,
