@@ -353,7 +353,7 @@ class PointTransformerBlock(nn.Module):
         return [p, x, o]
 
 class PointTransformerSeg(nn.Module):
-    def __init__(self, block, blocks, c=6, k=13):
+    def __init__(self, block, blocks, c=6, k=13, dropout_p=0):
         super().__init__()
         self.c = c
         self.in_planes, planes = c, [32, 64, 128, 256, 512]
@@ -369,7 +369,7 @@ class PointTransformerSeg(nn.Module):
         self.dec3 = self._make_dec(block, planes[2], 2, share_planes, nsample=nsample[2])  # fusion p4 and p3
         self.dec2 = self._make_dec(block, planes[1], 2, share_planes, nsample=nsample[1])  # fusion p3 and p2
         self.dec1 = self._make_dec(block, planes[0], 2, share_planes, nsample=nsample[0])  # fusion p2 and p1
-        self.cls = nn.Sequential(nn.Linear(planes[0], planes[0]), nn.BatchNorm1d(planes[0]), nn.ReLU(inplace=True), nn.Linear(planes[0], k))
+        self.cls = nn.Sequential(nn.Linear(planes[0], planes[0]), nn.BatchNorm1d(planes[0]), nn.ReLU(inplace=True), nn.Dropout(p=dropout_p), nn.Linear(planes[0], k))
 
     def _make_enc(self, block, planes, blocks, share_planes=8, stride=1, nsample=16):
         layers = []
@@ -409,7 +409,7 @@ class PointTransformerSeg(nn.Module):
 # ==========================================
 
 class get_model(nn.Module):
-    def __init__(self, num_classes, input_dim=8):
+    def __init__(self, num_classes, input_dim=8,dropout_p=0):
         super(get_model, self).__init__()
         self.input_dim = input_dim
         
@@ -419,7 +419,8 @@ class get_model(nn.Module):
             block=PointTransformerBlock, 
             blocks=[2, 3, 4, 6, 3], 
             c=input_dim, 
-            k=num_classes
+            k=num_classes,
+            dropout_p=dropout_p
         )
 
     def forward(self, xyz):

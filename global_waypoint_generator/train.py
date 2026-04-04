@@ -18,22 +18,22 @@ SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\checkpoints"
 
 # 2. 真实的训练数据路径
 # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
-DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
+DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
 
 GAMMA = 2 
-TOTAL_EPOCHS = 30         
+TOTAL_EPOCHS = 60         
 # ---------------------      
 # ---------------------
 
 def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
     # --- Warm-up 策略 ---
-    if epoch_idx <= 20:
+    if epoch_idx <= 40:
         criterion.w_straight = 0.0
         criterion.delta_s = 0.00
         criterion.delta_d = 0.00  
         phase_name = "Warm-up (FOCAL Only)"
     else:
-        criterion.w_straight = 5.0
+        criterion.w_straight = 6
         criterion.w_cost = 0.0
         criterion.w_safety = 0.1
         criterion.cost_thresh = 0.7
@@ -137,6 +137,34 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
 
     return total_loss / len(loader)
 
+class EarlyStopping:
+    def __init__(self, patience=15, delta=0.001, save_dir='checkpoints'):
+        """
+        patience: 容忍多少个 epoch 验证集 loss 不下降
+        delta: loss 至少要下降多少才算真的下降
+        save_dir: 权重保存的文件夹路径
+        """
+        self.patience = patience
+        self.delta = delta
+        self.counter = 0
+        self.best_loss = np.Inf
+        self.early_stop = False
+        self.save_dir = save_dir
+
+    def __call__(self, val_loss, model):
+        if val_loss < self.best_loss - self.delta:
+            # 创新低，保存最优模型，清空计数器
+            self.best_loss = val_loss
+            self.counter = 0
+            torch.save(model.state_dict(), os.path.join(self.save_dir, "best_model.pth"))
+            print(f"  >>> New Best Model Saved! (Val Loss: {val_loss:.4f})")
+        else:
+            # 没创新低，计数器加 1
+            self.counter += 1
+            print(f"  >>> EarlyStopping counter: {self.counter} out of {self.patience}")
+            if self.counter >= self.patience:
+                self.early_stop = True
+
 @torch.no_grad()
 def validate(model, loader, criterion, device):
     """
@@ -191,7 +219,7 @@ def main():
     print(f"Checkpoints will be saved to: {save_dir}")
 
     # ==========================================
-    # 2. Data Loading (整体挪到了模型前面)
+    # 2. Data Loading
     # ==========================================
     data_dir = DATA_DIR
     all_files = glob.glob(os.path.join(data_dir, "*.npz"))
@@ -208,15 +236,14 @@ def main():
     val_loader   = build_dataloader(val_files, batch_size=32, shuffle=False)
 
     # --- 【最简单的动态探针】 ---
-    # 拿一个 batch 出来探测真实维度 (DataLoader 输出的 points 形状通常为 [B, N, C])
-    sample_points, _, curr_gt_waypoints= next(iter(train_loader))
+    sample_points, _, curr_gt_waypoints = next(iter(train_loader))
     real_input_dim = sample_points.shape[-1]
     print(f"[*] 动态检测到数据特征维度为: {real_input_dim}")
 
     # ==========================================
-    # 3. Model (传入刚刚探测出来的真实维度)
+    # 3. Model
     # ==========================================
-    model = get_model(num_classes=1, input_dim=real_input_dim).to(device)
+    model = get_model(num_classes=1, input_dim=real_input_dim, dropout_p=0).to(device)
 
     # 4. Loss Configuration
     criterion = get_loss(
@@ -241,7 +268,9 @@ def main():
 
     train_loss_list = []
     val_loss_list = []
-    best_val_loss = float('inf')
+
+    # 💡 新增：实例化早停对象 (容忍 15 个 epoch 没有显著提升)
+    early_stopping = EarlyStopping(patience=60, delta=0.001, save_dir=save_dir)
 
     print(f"Start training on {device} with gamma={GAMMA}...")
     
@@ -251,7 +280,7 @@ def main():
             model, train_loader, criterion, optimizer, device, epoch
         )
         
-        # Validate (传入 criterion 保证评估尺度一致)
+        # Validate 
         val_loss = validate(model, val_loader, criterion, device)
         
         scheduler.step()
@@ -266,16 +295,20 @@ def main():
         )
 
         # --- Save Strategy ---
+        # 无论如何保存最新的 epoch
         torch.save(model.state_dict(), os.path.join(save_dir, "last_model.pth"))
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pth"))
-            print(f"  >>> New Best Model Saved! (Val Loss: {val_loss:.4f})")
+        # 💡 新增：调用早停判定器 (它内部会自动判断并保存 best_model.pth)
+        early_stopping(val_loss, model)
 
         if epoch % 10 == 0:
             torch.save(model.state_dict(), os.path.join(save_dir, f"ckpt_epoch_{epoch}.pth"))
             plot_loss_curve(train_loss_list, val_loss_list, save_dir)
+
+        # 💡 新增：触发早停的退出逻辑
+        if early_stopping.early_stop:
+            print(f"🛑 触发早停机制！模型在最近 {early_stopping.patience} 个 Epoch 内没有提升，提前结束训练。")
+            break
 
     print("绘制最终 Loss 曲线...")
     plot_loss_curve(train_loss_list, val_loss_list, save_dir)

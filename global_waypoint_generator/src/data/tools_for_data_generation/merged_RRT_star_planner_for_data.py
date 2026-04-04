@@ -5,7 +5,7 @@ import random
 import math
 import time
 from mpl_toolkits.mplot3d import Axes3D
-from env_generator_for_data import env_generator
+from env_generator_for_data import env_generator, env_generator_cluster
 from res_show_for_data import plot_tree_and_path, plot_tree_and_path_and_waypoints
 from scipy.spatial import KDTree
 from sklearn.cluster import DBSCAN
@@ -1678,11 +1678,11 @@ def is_path_meaningful(waypoints, min_angle_deg=15.0):
 if __name__ == '__main__':
     # ================= 配置区域 =================
     NUM_MAPS = 50          # 地图数量
-    TASKS_PER_MAP = 30    # 需要成功保存的有效任务数
+    TASKS_PER_MAP = 20    # 需要成功保存的有效任务数
     BASE_SEED = 39         # 基础随机种子
     
     # 保存路径
-    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
+    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
     
     # RRT* 参数
     R_AGENT_CRASH = 1.2
@@ -1692,7 +1692,7 @@ if __name__ == '__main__':
     SEARCH_RADIUS = 150
     
     # 质量控制参数
-    MIN_TURN_ANGLE = 15.0  # 判定有效拐弯的最小角度阈值 (度)，小于这个视作平直路线
+    MIN_TURN_ANGLE = 45  # 判定有效拐弯的最小角度阈值 (度)，小于这个视作平直路线
     # ===========================================
 
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -1705,14 +1705,16 @@ if __name__ == '__main__':
         print(f"\n[{map_id+1}/{NUM_MAPS}] 正在生成第 {map_id} 号地图 (Seed={current_seed})...")
         
         # 1. 生成地图
-        env_map = env_generator(
-            rho=random.uniform(0.7, 0.9),   # 数据更丰富不容易出现过拟合
-            map_dim=(1500, 1500, 240),
-            r_crash_range=(30, 50),
-            r_risk_range=(3, 7),
-            zmax_range=(30, 240),
-            max_iter=5000,
-            seed=current_seed
+        env_map=env_generator_cluster(
+            map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
+            num_clusters=20,             # 建议 10~15 之间，保证有足够空间
+            chain_length_range=(1, 4),   # 每个簇的圆柱体数量
+            r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
+            r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
+            r_risk_range=(10, 20),       # 风险半径偏移量
+            zmax_range=(240, 240),
+            min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
+            seed=BASE_SEED,
         )
         obstacle_list = env_map["obstacles"]
         print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。开始执行 RRT* 与质量筛选...")
@@ -1728,7 +1730,7 @@ if __name__ == '__main__':
             attempts += 1
             
             # 动态生成 1 个任务。利用 attempts 作为增量改变 seed，确保每次生成不同的点对
-            task = generate_valid_tasks(1, env_map, min_dist=1000, seed=current_seed + attempts)
+            task = generate_valid_tasks(1, env_map, min_dist=1200, seed=current_seed + attempts)
             start, goal = task[0]
             
             # 初始化 RRT*
