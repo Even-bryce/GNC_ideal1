@@ -339,7 +339,7 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
         )
         
         # 4. GT热力图聚类 (仅供对比参考)
-        gt_mask = mid_target > 0.9
+        gt_mask = mid_target > 0.7
         gt_xyz_filtered = mid_xyz[gt_mask].cpu().numpy()
         gt_scores_filtered = mid_target[gt_mask].cpu().numpy()
         
@@ -510,8 +510,8 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
 
 if __name__ == "__main__":
     
-    # DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
-    DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
+    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
+    # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
     CKPT_PATH = r"C:\Users\Administrator\Desktop\experiments\checkpoints\best_model.pth"
 
 

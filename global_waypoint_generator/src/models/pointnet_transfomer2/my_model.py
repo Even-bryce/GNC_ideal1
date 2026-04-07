@@ -370,6 +370,27 @@ class PointTransformerSeg(nn.Module):
         self.dec2 = self._make_dec(block, planes[1], 2, share_planes, nsample=nsample[1])  # fusion p3 and p2
         self.dec1 = self._make_dec(block, planes[0], 2, share_planes, nsample=nsample[0])  # fusion p2 and p1
         self.cls = nn.Sequential(nn.Linear(planes[0], planes[0]), nn.BatchNorm1d(planes[0]), nn.ReLU(inplace=True), nn.Dropout(p=dropout_p), nn.Linear(planes[0], k))
+        # # 💡 替换为高容量门控双分支头 (Dual-Branch Gated Head)
+        # self.head_base = nn.Sequential(
+        #     nn.Linear(planes[0], planes[0]), 
+        #     nn.BatchNorm1d(planes[0]), 
+        #     nn.ReLU(inplace=True), 
+        #     nn.Dropout(p=dropout_p)
+        # )
+        
+        # # 专家 1：主攻召回 (迎合 Focal Loss，找点)
+        # self.expert_recall = nn.Linear(planes[0], k)
+        
+        # # 专家 2：主攻精简 (迎合几何 Loss，剔除冗余)
+        # self.expert_refine = nn.Linear(planes[0], k)
+        
+        # # 门控网络 (根据特征决定听哪个专家的)
+        # self.gate = nn.Sequential(
+        #     nn.Linear(planes[0], planes[0] // 2),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(planes[0] // 2, 2),
+        #     nn.Softmax(dim=-1) # 输出两个专家的权重，和为 1
+        # )
 
     def _make_enc(self, block, planes, blocks, share_planes=8, stride=1, nsample=16):
         layers = []
@@ -402,6 +423,17 @@ class PointTransformerSeg(nn.Module):
         x2 = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3, o3]), o2])[1]
         x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2, o2]), o1])[1]
         x = self.cls(x1)
+        # # 💡 新的输出逻辑
+        # feat = self.head_base(x1)
+        
+        # out_recall = self.expert_recall(feat)
+        # out_refine = self.expert_refine(feat)
+        
+        # # 计算门控权重
+        # gating_weights = self.gate(feat) # [N, 2]
+        
+        # # 动态融合：w1 * expert1 + w2 * expert2
+        # x = gating_weights[:, 0:1] * out_recall + gating_weights[:, 1:2] * out_refine
         return x
 
 # ==========================================
@@ -478,91 +510,161 @@ def focal_loss(logits, targets, weights=None, alpha=0.9, gamma=2.0):
         loss = loss * weights
     return loss.mean()
 
-def straightness_loss(p, xyz, delta_s=0.5, delta_d=0.2, r_corridor=0.03, rho=20000.0, alpha2=1.0, eps=1e-6, M_max=128, K=2):
+
+def get_skeleton_and_pairs(pb, xb, f_start_b, f_goal_b, delta_s=0.5, R_nms=0.5, K_local=3, delta_d=0.2, K_pairs=3):
+    """
+    K_pairs: 定义每个节点最多寻找的前向/后向邻居数量
+    """
+    # 💡 终极修复：利用特征场识别起终点
+    is_start = f_start_b > 0.95
+    is_goal = f_goal_b > 0.95
+    
+    # 💡 赋予免死金牌：只要预测分数达标，【或者】它是起终点，就允许进入候选池！
+    base_mask = (pb > delta_s) | is_start | is_goal 
+    
+    idx_base = torch.nonzero(base_mask, as_tuple=False).squeeze(-1)
+    
+    if idx_base.numel() < 2:
+        return None, None, None, None, None
+        
+    pb_base, xb_base = pb[idx_base], xb[idx_base]
+    dist_base = torch.cdist(xb_base, xb_base)
+    in_nms = dist_base < R_nms
+    higher_p = pb_base.unsqueeze(0) < pb_base.unsqueeze(1) 
+    higher_count = (in_nms & higher_p).sum(dim=1) 
+    v_mask = higher_count < K_local
+    V_idx = idx_base[v_mask]
+    
+    if V_idx.numel() < 2: 
+        return None, None, None, None, None
+        
+    v_pb, v_xb = pb[V_idx], xb[V_idx]
+    v_fs, v_fg = f_start_b[V_idx], f_goal_b[V_idx]
+    dist_v = torch.cdist(v_xb, v_xb)
+    
+    # 💡 动态确定 Top-K 的真实数量 (防止筛选后存活的骨架点总数小于 K_pairs 导致报错)
+    actual_K = min(K_pairs, V_idx.shape[0])
+    
+    # 找 k* 集合 (prev)
+    cond_k_dist = dist_v > delta_d
+    cond_k_fs = v_fs.unsqueeze(0) < v_fs.unsqueeze(1) 
+    cond_k_fg = v_fg.unsqueeze(0) > v_fg.unsqueeze(1) 
+    valid_k = cond_k_dist & cond_k_fs & cond_k_fg
+    diff_fs = v_fs.unsqueeze(1) - v_fs.unsqueeze(0) 
+    diff_fs = torch.where(valid_k, diff_fs, torch.full_like(diff_fs, float('inf')))
+    
+    # 💡 升级为集合：取差值最小的 Top-K 个邻居
+    vals_k, k_star_local = torch.topk(diff_fs, k=actual_K, dim=1, largest=False)
+    # 只要取出来的最小值不是 inf，就说明找到了合法的真实邻居，has_k 形状变为 [M, actual_K]
+    has_k = (vals_k != float('inf'))
+    
+    # 找 j* 集合 (next)
+    cond_j_dist = dist_v > delta_d
+    cond_j_fg = v_fg.unsqueeze(0) < v_fg.unsqueeze(1) 
+    cond_j_fs = v_fs.unsqueeze(0) > v_fs.unsqueeze(1) 
+    valid_j = cond_j_dist & cond_j_fg & cond_j_fs
+    diff_fg = v_fg.unsqueeze(1) - v_fg.unsqueeze(0) 
+    diff_fg = torch.where(valid_j, diff_fg, torch.full_like(diff_fg, float('inf')))
+    
+    # 💡 升级为集合：取差值最小的 Top-K 个邻居
+    vals_j, j_star_local = torch.topk(diff_fg, k=actual_K, dim=1, largest=False)
+    # has_j 形状变为 [M, actual_K]
+    has_j = (vals_j != float('inf'))
+    
+    return V_idx, k_star_local, j_star_local, has_k, has_j
+
+def straightness_loss(p, xyz, f_start, f_goal, delta_s=0.5, R_nms=0.5, K_local=3, delta_d=0.2, K_pairs=3, r_corridor=0.03, rho=20000.0, alpha2=1.0, alpha3=1.0, tau_s=0.6, eps=1e-6):
     B, N, _ = xyz.shape
     device = xyz.device
     total_loss = []
     
     for b in range(B):
-        mask = p[b] > delta_s
-        idx = torch.nonzero(mask, as_tuple=False).squeeze(-1)
+        pb, xb = p[b], xyz[b]
+        f_start_b, f_goal_b = f_start[b], f_goal[b]
         
-        # ⚠️ 必须至少有 K+1 个高分点，才能保证一个点能找到 K 个邻居
-        if idx.numel() <= K: continue 
+        V_idx, k_star, j_star, has_k, has_j = get_skeleton_and_pairs(
+            pb, xb, f_start_b, f_goal_b, delta_s, R_nms, K_local, delta_d, K_pairs
+        )
         
-        if idx.numel() > M_max:
-            topk_idx = torch.topk(p[b, idx], M_max).indices
-            idx = idx[topk_idx]
+        if V_idx is None: continue
             
-        xb = xyz[b, idx]
-        pb = p[b, idx]
+        v_xb, v_pb = xb[V_idx], pb[V_idx]
+        v_fs, v_fg = f_start_b[V_idx], f_goal_b[V_idx]
+        M = V_idx.shape[0]
+        xb_all = xb 
         
-        M = xb.shape[0]
-        dist_ij = torch.cdist(xb, xb)
-        valid_pair_mask = (dist_ij > delta_d).float()
-        
-        # 如果整张图连一对合法的都没有，直接跳过
-        if valid_pair_mask.sum() < 1: continue
-        
-        xi, xj = xb.unsqueeze(1), xb.unsqueeze(0)
-        xk = xb.unsqueeze(0).unsqueeze(0)
-        
-        v = xj - xi
-        vv = (v ** 2).sum(-1, keepdim=True) + eps
-        w = xk - xi.unsqueeze(1)
-        t = (w * v.unsqueeze(1)).sum(-1, keepdim=True) / vv.unsqueeze(1)
-        t = torch.clamp(t, 0.0, 1.0)
-        proj = xi.unsqueeze(1) + t * v.unsqueeze(1)
-        d_k_to_seg = torch.norm(xk - proj, dim=-1)
-        
-        N_ij = (d_k_to_seg <= r_corridor).sum(dim=-1).float()
-        V_corridor = math.pi * r_corridor ** 2 * dist_ij
-        N_corridor_max = rho * V_corridor + eps
-        
-        p_i, p_j = pb.unsqueeze(1), pb.unsqueeze(0)
-        
-        # --- 截断与通畅度计算 ---
-        ratio = N_ij / N_corridor_max
-        ratio = torch.clamp(ratio, min=0.0, max=1.0)
-        phi_s = torch.exp(alpha2 * (ratio - 1.0))
-        
-        # ==========================================
-        # --- 新的 TOP-K 核心逻辑 (完全映射截图公式) ---
-        # ==========================================
-        
-        # 1. 计算寻找集合 Si 的内部打分矩阵: (p_j * phi_s(i, j))
-        search_score_mat = p_j * phi_s * valid_pair_mask
-        
-        # 2. 统计每个点周围合法的目标数量
-        valid_targets_per_point = valid_pair_mask.sum(dim=1)
-        
-        # 3. 找出满足 "周围至少有 K 个目标" 的合法起点 (用作公式的分母 M_2)
-        has_enough_targets = (valid_targets_per_point >= K).float()
-        M_2 = has_enough_targets.sum()
-        
-        # 如果没有任何一个点能凑齐 K 个邻居，跳过该 batch
-        if M_2 < 1: 
-            continue
+        # 内部函数：寻找最佳邻居 x* 并返回 Q_straight
+        def get_best_q_straight(neighbors_idx, has_neighbors, is_prev=True):
+            K_actual = neighbors_idx.shape[1]
+            phi_s = torch.zeros((M, K_actual), device=device)
+            phi_c = torch.zeros((M, K_actual), device=device)
             
-        # 4. 执行 TOP-K 提取，返回的 topk_values 形状为 [M, K]
-        topk_values = search_score_mat.topk(k=K, dim=1).values
+            valid_mask = has_neighbors
+            if not valid_mask.any():
+                return torch.zeros(M, device=device), torch.zeros(M, dtype=torch.bool, device=device)
+                
+            idx_m, idx_k = torch.nonzero(valid_mask, as_tuple=True)
+            n_idx = neighbors_idx[idx_m, idx_k]
+            
+            p1 = v_xb[idx_m]
+            p2 = v_xb[n_idx]
+            
+            # --- 算 phi_s ---
+            v = p2 - p1
+            vv = (v**2).sum(-1, keepdim=True) + eps
+            w = xb_all.unsqueeze(0) - p1.unsqueeze(1) 
+            t = torch.clamp((w * v.unsqueeze(1)).sum(-1, keepdim=True) / vv.unsqueeze(1), 0.0, 1.0)
+            proj = p1.unsqueeze(1) + t * v.unsqueeze(1)
+            d_to_seg = torch.norm(xb_all.unsqueeze(0) - proj, dim=-1)
+            
+            N_ij = (d_to_seg <= r_corridor).sum(dim=-1).float()
+            dist_ij = torch.norm(v, dim=-1)
+            V_corridor = math.pi * (r_corridor**2) * dist_ij
+            N_max = rho * V_corridor + eps
+            phi_s[idx_m, idx_k] = torch.exp(alpha2 * (torch.clamp(N_ij / N_max, 0.0, 1.0) - 1.0))
+            
+            # --- 算 phi_c (用于联合对抗打分) ---
+            if is_prev:
+                delta_f = v_fs[n_idx] - v_fs[idx_m]
+            else:
+                delta_f = v_fg[n_idx] - v_fg[idx_m]
+            phi_c[idx_m, idx_k] = torch.exp(alpha3 * ((delta_f * delta_d) / (dist_ij + eps) - 1.0))
+            
+            p_x = v_pb[neighbors_idx]
+            p_x = torch.where(has_neighbors, p_x, torch.zeros_like(p_x))
+            
+            # 💡 联合打分找 x*
+            Phi_total = phi_s * phi_c
+            joint_score = p_x * Phi_total
+            best_idx = torch.argmax(joint_score, dim=1)
+            row_idx = torch.arange(M, device=device)
+            
+            # 💡 提取 x* 的专属直线得分
+            best_phi_s = phi_s[row_idx, best_idx]
+            best_p_x = p_x[row_idx, best_idx]
+            has_any = has_neighbors.any(dim=1)
+            
+            Q_s = best_p_x * best_phi_s
+            return Q_s, has_any
+
+        Q_s_k, has_any_k = get_best_q_straight(k_star, has_k, is_prev=True)
+        Q_s_j, has_any_j = get_best_q_straight(j_star, has_j, is_prev=False)
         
-        # 5. 对选出的 K 个值求平均: mean_{j \in S_i}(...)
-        # 形状变为 [M]
-        mean_topk_vals = topk_values.mean(dim=1)
+        sum_Q = Q_s_k * has_any_k.float() + Q_s_j * has_any_j.float()
+        num_E = has_any_k.float() + has_any_j.float()
         
-        # 6. 外层乘上 -p_i，得到一维的损失数组
-        # p_i 原本是 [M, 1]，通过 squeeze(1) 变成 [M] 以对齐维度
-        loss_mat_1d = -1.0 * p_i.squeeze(1) * mean_topk_vals
+        valid_mask = num_E > 0
+        if not valid_mask.any(): continue
+            
+        Q_straight = sum_Q[valid_mask] / num_E[valid_mask]
+        p_i_valid = v_pb[valid_mask]
         
-        # 7. 求和并除以 M_2
-        loss_b = (loss_mat_1d * has_enough_targets).sum() / (M_2 + eps)
-        
+        # 💡 [tau_s - Q_straight]
+        loss_b = (p_i_valid * (tau_s - Q_straight.detach())).sum() / valid_mask.sum()
         total_loss.append(loss_b)
-        
+
     if len(total_loss) == 0: 
         return torch.tensor(0.0, device=device, requires_grad=True)
-        
     return torch.stack(total_loss).mean()
 
 def safety_loss(p, xyz, delta_s=0.5, r_local=0.05, rho=20000.0, alpha1=1.0, eps=1e-6, M_max=128):
@@ -599,7 +701,7 @@ def safety_loss(p, xyz, delta_s=0.5, r_local=0.05, rho=20000.0, alpha1=1.0, eps=
         # --------------------
         
         # ⚠️ 重要修正：补充公式里的负号，指导优化器最大化这个得分
-        loss_b = -1.0 * (pb * e_i).mean()
+        loss_b = -1.0 * (pb * e_i.detach()).mean()
         losses.append(loss_b)
         
     if len(losses) == 0: 
@@ -619,124 +721,190 @@ def connectivity_loss(p, xyz, r_connect=0.05, delta_c=0.1):
     return loss.sum() / denom
 
 
-def cost_loss(p, xyz, delta_s=0.5, delta_d=0.2, r_corridor=0.03, rho=20000.0, alpha2=1.0, eps=1e-6, M_max=128, K=2):
+def cost_loss(p, xyz, f_start, f_goal, delta_s=0.5, R_nms=0.5, K_local=3, delta_d=0.2, K_pairs=3, r_corridor=0.03, rho=20000.0, alpha2=1.0, alpha3=1.0, tau_c=0.6, eps=1e-6):
     B, N, _ = xyz.shape
     device = xyz.device
     total_loss = []
     
     for b in range(B):
-        mask = p[b] > delta_s
-        idx = torch.nonzero(mask, as_tuple=False).squeeze(-1)
-        if idx.numel() <= K: continue 
+        pb, xb = p[b], xyz[b]
+        f_start_b, f_goal_b = f_start[b], f_goal[b]
         
-        if idx.numel() > M_max:
-            topk_idx = torch.topk(p[b, idx], M_max).indices
-            idx = idx[topk_idx]
+        V_idx, k_star, j_star, has_k, has_j = get_skeleton_and_pairs(
+            pb, xb, f_start_b, f_goal_b, delta_s, R_nms, K_local, delta_d, K_pairs
+        )
+        
+        if V_idx is None: continue
             
-        xb = xyz[b, idx]
-        pb = p[b, idx]
+        v_xb, v_pb = xb[V_idx], pb[V_idx]
+        v_fs, v_fg = f_start_b[V_idx], f_goal_b[V_idx]
+        M = V_idx.shape[0]
+        xb_all = xb 
         
-        M = xb.shape[0]
-        dist_ij = torch.cdist(xb, xb)
-        valid_pair_mask = (dist_ij > delta_d).float()
-        
-        if valid_pair_mask.sum() < 1: continue
-        
-        xi, xj = xb.unsqueeze(1), xb.unsqueeze(0)
-        xk = xb.unsqueeze(0).unsqueeze(0)
-        
-        # Initial logic and parameters are validated. Standard processing applied for spatial relationships.
-        v = xj - xi
-        vv = (v ** 2).sum(-1, keepdim=True) + eps
-        w = xk - xi.unsqueeze(1)
-        t = (w * v.unsqueeze(1)).sum(-1, keepdim=True) / vv.unsqueeze(1)
-        t = torch.clamp(t, 0.0, 1.0)
-        proj = xi.unsqueeze(1) + t * v.unsqueeze(1)
-        d_k_to_seg = torch.norm(xk - proj, dim=-1)
-        
-        N_ij = (d_k_to_seg <= r_corridor).sum(dim=-1).float()
-        V_corridor = math.pi * r_corridor ** 2 * dist_ij
-        N_corridor_max = rho * V_corridor + eps
-        
-        ratio = torch.clamp(N_ij / N_corridor_max, min=0.0, max=1.0)
-        phi_s = torch.exp(alpha2 * (ratio - 1.0))
-        
-        p_i, p_j = pb.unsqueeze(1), pb.unsqueeze(0)
-        
-        # ==========================================
-        # S_i Extraction and Cost Evaluation
-        # ==========================================
-        
-        search_score_mat = p_j * phi_s * valid_pair_mask
-        valid_targets_per_point = valid_pair_mask.sum(dim=1)
-        has_enough_targets = (valid_targets_per_point >= K).float()
-        M_2 = has_enough_targets.sum()
-        
-        if M_2 < 1: 
-            continue
+        # 内部函数：寻找最佳邻居 x* 并返回 Q_cost
+        def get_best_q_cost(neighbors_idx, has_neighbors, is_prev=True):
+            K_actual = neighbors_idx.shape[1]
+            phi_s = torch.zeros((M, K_actual), device=device)
+            phi_c = torch.zeros((M, K_actual), device=device)
             
-        # Top-K indices to form set S_i
-        topk_indices = search_score_mat.topk(k=K, dim=1).indices
+            valid_mask = has_neighbors
+            if not valid_mask.any():
+                return torch.zeros(M, device=device), torch.zeros(M, dtype=torch.bool, device=device)
+                
+            idx_m, idx_k = torch.nonzero(valid_mask, as_tuple=True)
+            n_idx = neighbors_idx[idx_m, idx_k]
+            
+            p1 = v_xb[idx_m]
+            p2 = v_xb[n_idx]
+            
+            # --- 算 phi_s (用于联合对抗打分) ---
+            v = p2 - p1
+            vv = (v**2).sum(-1, keepdim=True) + eps
+            w = xb_all.unsqueeze(0) - p1.unsqueeze(1) 
+            t = torch.clamp((w * v.unsqueeze(1)).sum(-1, keepdim=True) / vv.unsqueeze(1), 0.0, 1.0)
+            proj = p1.unsqueeze(1) + t * v.unsqueeze(1)
+            d_to_seg = torch.norm(xb_all.unsqueeze(0) - proj, dim=-1)
+            
+            N_ij = (d_to_seg <= r_corridor).sum(dim=-1).float()
+            dist_ij = torch.norm(v, dim=-1)
+            V_corridor = math.pi * (r_corridor**2) * dist_ij
+            N_max = rho * V_corridor + eps
+            phi_s[idx_m, idx_k] = torch.exp(alpha2 * (torch.clamp(N_ij / N_max, 0.0, 1.0) - 1.0))
+            
+            # --- 算 phi_c ---
+            if is_prev:
+                delta_f = v_fs[n_idx] - v_fs[idx_m]
+            else:
+                delta_f = v_fg[n_idx] - v_fg[idx_m]
+            phi_c[idx_m, idx_k] = torch.exp(alpha3 * ((delta_f * delta_d) / (dist_ij + eps) - 1.0))
+            
+            p_x = v_pb[neighbors_idx]
+            p_x = torch.where(has_neighbors, p_x, torch.zeros_like(p_x))
+            
+            # 💡 联合打分找 x*
+            Phi_total = phi_s * phi_c
+            joint_score = p_x * Phi_total
+            best_idx = torch.argmax(joint_score, dim=1)
+            row_idx = torch.arange(M, device=device)
+            
+            # 💡 提取 x* 的专属成本得分
+            best_phi_c = phi_c[row_idx, best_idx]
+            best_p_x = p_x[row_idx, best_idx]
+            has_any = has_neighbors.any(dim=1)
+            
+            Q_c = best_p_x * best_phi_c
+            return Q_c, has_any
+
+        Q_c_k, has_any_k = get_best_q_cost(k_star, has_k, is_prev=True)
+        Q_c_j, has_any_j = get_best_q_cost(j_star, has_j, is_prev=False)
         
-        # Gather p_j and d_ij specific to S_i
-        chosen_pj = torch.gather(p_j.expand(M, M), 1, topk_indices)
-        chosen_dists = torch.gather(dist_ij, 1, topk_indices)
+        sum_Q = Q_c_k * has_any_k.float() + Q_c_j * has_any_j.float()
+        num_E = has_any_k.float() + has_any_j.float()
         
-        # Calculate the internal metric: p_j * (delta_d / d_ij)
-        cost_metric = chosen_pj * (delta_d / (chosen_dists + eps))
+        valid_mask = num_E > 0
+        if not valid_mask.any(): continue
+            
+        Q_cost = sum_Q[valid_mask] / num_E[valid_mask]
+        p_i_valid = v_pb[valid_mask]
         
-        # Mean across the K targets
-        mean_cost = cost_metric.mean(dim=1)
-        
-        # Multiply by -p_i
-        loss_mat_1d = -1.0 * p_i.squeeze(1) * mean_cost
-        
-        loss_b = (loss_mat_1d * has_enough_targets).sum() / (M_2 + eps)
+        # 💡 [tau_c - Q_cost]
+        loss_b = (p_i_valid * (tau_c - Q_cost.detach())).sum() / valid_mask.sum()
         total_loss.append(loss_b)
-        
+
     if len(total_loss) == 0: 
         return torch.tensor(0.0, device=device, requires_grad=True)
-        
     return torch.stack(total_loss).mean()
 
 class get_loss(nn.Module):
-    def __init__(self, w_bce=1.0, w_straight=3, w_safety=0.2, w_conn=0.0, 
-                 w_cost=0.0,
-                 alpha=0.6, gamma=2.0, delta_s=0.5, delta_d=0.2, K=2, r_corridor=0.03, 
-                 rho=20000.0, alpha2=1.0, M_pair_max=128, r_local=0.05, 
-                 alpha1=1.0, M_safe_max=256, delta_c=0.1, r_connect=0.05):
+    # 💡 修改 1: 移除了不再需要的 d_max=10.0
+    # 💡 修改 2: 新增了 K_pairs=3
+    # 💡 修改 3: 建议将 alpha3 默认值改为 1.0 (配合映射到 [e^-1, 1])
+    # 💡 修改 4: 建议将 tau_c 默认值改为 0.6 (与 tau_s 保持合理的及格线)
+    def __init__(self, w_bce=1.0, w_straight=1.0, w_safety=0.2, w_conn=0.0, 
+                 w_cost=1.0, alpha=0.6, gamma=2.0, delta_s=0.5, delta_d=0.2, 
+                 R_nms=0.5, K_local=3, K_pairs=3, r_corridor=0.03, rho=20000.0, 
+                 alpha2=1.0, alpha3=1.0, tau_s=0.6, tau_c=0.6, 
+                 M_pair_max=256, r_local=0.05, alpha1=1.0, M_safe_max=256, 
+                 delta_c=0.1, r_connect=0.05):
         super().__init__()
+        # 权重设置
         self.w_bce = w_bce; self.w_straight = w_straight; self.w_safety = w_safety; self.w_conn = w_conn
-        self.w_cost = w_cost; 
+        self.w_cost = w_cost
+        
+        # Focal Loss 参数
         self.alpha = alpha; self.gamma = gamma
-        self.delta_s = delta_s; self.K = K;self.delta_d = delta_d; self.r_corridor = r_corridor; self.rho = rho; self.alpha2 = alpha2; self.M_pair_max = M_pair_max
-        self.r_local = r_local; self.alpha1 = alpha1; self.M_safe_max = M_safe_max
-        self.delta_c = delta_c; self.r_connect = r_connect
+        
+        # 骨架提取与点对筛选参数
+        self.delta_s = delta_s; self.delta_d = delta_d
+        self.R_nms = R_nms; self.K_local = K_local
+        self.K_pairs = K_pairs  # 集合最大容量
+        
+        # 物理评估参数
+        self.r_corridor = r_corridor; self.rho = rho
+        self.alpha2 = alpha2; self.alpha3 = alpha3
+        
+        # 动态奖惩基准线
+        self.tau_s = tau_s; self.tau_c = tau_c
+        
+        # 其他安全与连通性参数
+        self.M_pair_max = M_pair_max; self.r_local = r_local; self.alpha1 = alpha1
+        self.M_safe_max = M_safe_max; self.delta_c = delta_c; self.r_connect = r_connect
 
-    def forward(self, logits, targets, xyz): # <-- 注意：这里不需要 full_points 了！
+    def forward(self, logits, targets, points):
         if isinstance(logits, (tuple, list)): logits = logits[0]
         
-        # 提取物理坐标: [B, N, 3]
-        if xyz.shape[1] == 8 or xyz.shape[1] == 3: xyz_phys = xyz.permute(0, 2, 1)
-        else: xyz_phys = xyz
-        xyz_phys = xyz_phys[..., :3]
+        # 1. 处理 points 格式: 确保通道在最后 [B, N, C]
+        if points.shape[1] >= 5: 
+            points_trans = points.permute(0, 2, 1).contiguous()
+        else: 
+            points_trans = points.contiguous()
+            
+        # 2. 动态提取特征：物理坐标和方向势场特征
+        xyz_phys = points_trans[..., :3]
+        f_start = points_trans[..., 3]
+        f_goal = points_trans[..., 4]
         
         p = torch.sigmoid(logits)
         if p.dim() == 3: p = p.squeeze(-1)
         
         loss = 0.0
         
-        # 1. 基础分类 Loss
+        # 3. 基础分类 Loss (Focal Loss)
+        # 注意：你需要确保 focal_loss 函数在外部已正确导入
         loss += self.w_bce * focal_loss(logits, targets, weights=None, alpha=self.alpha, gamma=self.gamma)
         
-        # 2. 其他Loss
+        # 4. 辅助物理约束 Loss
         if self.w_straight > 0:
-            loss += self.w_straight * straightness_loss(p=p, xyz=xyz_phys, delta_s=self.delta_s, delta_d=self.delta_d, r_corridor=self.r_corridor, rho=self.rho, alpha2=self.alpha2, M_max=self.M_pair_max, K=self.K)
+            # 💡 交叉传参：为了让 straightness_loss 能联合打分，把 alpha3 也传进去
+            loss += self.w_straight * straightness_loss(
+                p=p, xyz=xyz_phys, f_start=f_start, f_goal=f_goal, 
+                delta_s=self.delta_s, R_nms=self.R_nms, K_local=self.K_local, 
+                delta_d=self.delta_d, K_pairs=self.K_pairs, 
+                r_corridor=self.r_corridor, rho=self.rho, 
+                alpha2=self.alpha2, alpha3=self.alpha3, tau_s=self.tau_s
+            )
+            
         if self.w_safety > 0:
-            loss += self.w_safety * safety_loss(p=p, xyz=xyz_phys, delta_s=self.delta_s, r_local=self.r_local, rho=self.rho, alpha1=self.alpha1, M_max=self.M_safe_max)
+            # 安全 loss 不涉及特征场联合选拔，保持原样
+            loss += self.w_safety * safety_loss(
+                p=p, xyz=xyz_phys, delta_s=self.delta_s, r_local=self.r_local, 
+                rho=self.rho, alpha1=self.alpha1, M_max=self.M_safe_max
+            )
+            
         if self.w_conn > 0:
-            loss += self.w_conn * connectivity_loss(p=p, xyz=xyz_phys, r_connect=self.r_connect, delta_c=self.delta_c)
+            loss += self.w_conn * connectivity_loss(
+                p=p, xyz=xyz_phys, r_connect=self.r_connect, delta_c=self.delta_c
+            )
+            
         if self.w_cost > 0:
-            loss += self.w_cost * cost_loss(p=p, xyz=xyz_phys, delta_s=self.delta_s, delta_d=self.delta_d, r_corridor=self.r_corridor, rho=self.rho, alpha2=self.alpha2, M_max=self.M_pair_max, K=self.K)
+            # 💡 交叉传参：为了让 cost_loss 能联合打分，把 r_corridor, rho, alpha2 也传进去
+            # 同时移除了旧版的 d_max 参数
+            loss += self.w_cost * cost_loss(
+                p=p, xyz=xyz_phys, f_start=f_start, f_goal=f_goal,
+                delta_s=self.delta_s, R_nms=self.R_nms, K_local=self.K_local, 
+                delta_d=self.delta_d, K_pairs=self.K_pairs, 
+                r_corridor=self.r_corridor, rho=self.rho, 
+                alpha2=self.alpha2, alpha3=self.alpha3, tau_c=self.tau_c
+            )
 
         return loss

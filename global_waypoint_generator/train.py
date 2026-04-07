@@ -17,31 +17,36 @@ ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
 SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\checkpoints"
 
 # 2. 真实的训练数据路径
-DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
-# DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
+# DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
+DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
 
-GAMMA = 2.0
+START_EPOCH = 41  # 如果从头训练填 1；如果调参直接从第 41 轮开始，填 41
+PRETRAINED_CKPT = r"C:\Users\Administrator\Desktop\experiments\checkpoints\ckpt_epoch_40.pth" # 填入你第40轮保存的权重路径
+
+GAMMA = 2
 ALPHA = 0.6
-TOTAL_EPOCHS = 60         
+TOTAL_EPOCHS = 100         
 # ---------------------      
 # ---------------------
 
 def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
     # --- Warm-up 策略 ---
-    if epoch_idx <= 40:
+    warmup_epochs = 40
+    if epoch_idx <= warmup_epochs:
         criterion.w_bce = 20
         criterion.w_straight = 0.0
         criterion.w_cost = 0.0
-        criterion.w_safety = 0.0  
+        criterion.w_safety = 0.1  
         phase_name = "Warm-up (FOCAL Only)"
     else:
-        criterion.w_straight = 2
-        criterion.w_cost = 1
-        criterion.w_safety = 0.5
-        criterion.delta_s = 0.7
-        criterion.delta_d = 0.3
-        criterion.K = 2
-        criterion.M_pair_max = 128
+        criterion.w_bce = 20
+        criterion.w_straight = 5
+        criterion.w_cost = 4
+        criterion.w_safety = 0.2
+        criterion.delta_s = 0.8
+        criterion.delta_d = 0.2
+        criterion.tau_s = 0.4
+        criterion.tau_c = 0.3
         phase_name = "Refinement (other Loss Active)"
 
     model.train()
@@ -72,7 +77,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
         logits = output[0] if isinstance(output, (tuple, list)) else output
 
         # 3. 计算复合 Loss
-        loss = criterion(logits, targets, xyz)
+        loss = criterion(logits, targets, points)
         
         loss.backward()
         optimizer.step()
@@ -99,7 +104,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
                 neg_fpr_list.append(fpr.item())
 
             # --- 正样本统计 (漏检监控) ---
-            pos_mask = (targets > 0.9)
+            pos_mask = (targets > 0.8)
             
             # 自动提取距离特征 (适配起点和终点)
             if points.shape[1] >= 6:  # 只要总维度够，直接取倒数两列
@@ -193,7 +198,7 @@ def validate(model, loader, criterion, device):
         logits = output[0] if isinstance(output, (tuple, list)) else output
 
         # 使用同样的复合 Loss 计算验证误差
-        loss = criterion(logits, targets, xyz)
+        loss = criterion(logits, targets, points)
         total_loss += loss.item()
 
     return total_loss / len(loader)
@@ -248,38 +253,96 @@ def main():
     # ==========================================
     model = get_model(num_classes=1, input_dim=real_input_dim, dropout_p=0).to(device)
 
+    # 💡 新增：动态加载预训练权重
+    if START_EPOCH > 1:
+        if os.path.exists(PRETRAINED_CKPT):
+            print(f"\n[*] ⚡ 极速调参模式开启！正在加载第 {START_EPOCH-1} 轮预训练权重...")
+            model.load_state_dict(torch.load(PRETRAINED_CKPT, map_location=device))
+            print(f"[*] ✅ 权重加载成功: {PRETRAINED_CKPT}\n")
+        else:
+            print(f"\n[!] ❌ 找不到预训练权重文件: {PRETRAINED_CKPT}")
+            print("[!] 请检查路径是否正确！程序退出。")
+            return
+
     # 4. Loss Configuration
     criterion = get_loss(
-        w_bce=20,
-        w_straight=0,
-        w_safety=0,
+        w_bce=20.0,
+        w_straight=0.0,
+        w_safety=0.0,
         w_conn=0.0,
         w_cost=0.0,
         alpha=ALPHA,
         gamma=GAMMA,
-        delta_s=0.5,
+        delta_s=0.6,
+        delta_d=0.2,
         r_corridor=0.03,
         r_local=0.05,
         rho=25600.0,
+        # 💡 --- 新增的点对筛选与奖惩参数 ---
+        R_nms=0.15,       # 骨架点 NMS 抑制半径
+        K_local=3,
+        K_pairs=3,       # 局部允许的候选点最大数量 (增加多样性)
+        alpha2=2.0,      # 直线 Loss 的指数敏感度
+        alpha3=1.0,      # 成本 Loss 的指数敏感度
+        tau_s=0,       # 直线通畅度及格线 (大于奖励，小于惩罚)
+        tau_c=0,       # 成本(步长)及格线
+        
     ).to(device)
+
+
+    initial_lr = 1e-4 if START_EPOCH == 1 else 1e-5
 
     optimizer = torch.optim.Adam(
         model.parameters(),
-        lr=1e-3,
-        weight_decay=1e-4
+        lr=initial_lr,
+        weight_decay=5e-5
     )
+
+    step_size = 15 if START_EPOCH == 1 else 10 
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=0.5)
     
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.5)
 
     train_loss_list = []
     val_loss_list = []
 
     # 💡 新增：实例化早停对象 (容忍 15 个 epoch 没有显著提升)
-    early_stopping = EarlyStopping(patience=60, delta=0.001, save_dir=save_dir)
+    early_stopping = EarlyStopping(patience=15, delta=0.001, save_dir=save_dir)
 
     print(f"Start training on {device} with gamma={GAMMA}...")
     
-    for epoch in range(1, TOTAL_EPOCHS + 1):
+    for epoch in range(START_EPOCH, TOTAL_EPOCHS + 1):
+
+        # # ==========================================
+        # # 🚀 终极杀招：在 Refinement 阶段冻结主干网络
+        # # ==========================================
+        # warmup_epochs = 40  
+        
+        # if epoch == warmup_epochs + 1:
+        #     print(f"\n[{'='*40}]")
+        #     print("🚀 进入 Refinement 阶段！执行主干网络冻结 (Backbone Freezing)！")
+            
+        #     # 💡 1. 更新白名单：包含新设计的 MoE 头的四个核心组件
+        #     moe_head_keywords = ["head_base", "expert_recall", "expert_refine", "gate"]
+            
+        #     for name, param in model.named_parameters():
+        #         # 如果当前层的名字里，不包含上面任何一个关键字，就冻结它
+        #         if not any(keyword in name for keyword in moe_head_keywords):
+        #             param.requires_grad = False
+        #         else:
+        #             print(f"  ✅ 保持活动状态 (接受微调): {name}")
+            
+        #     # 2. 重新配置优化器，只把还活着的参数（分类头）喂给 Adam
+        #     active_params = filter(lambda p: p.requires_grad, model.parameters())
+            
+        #     # 💡 给新的 MoE 头一点活力，学习率设为 5e-5，同时加上一点 weight_decay 防过拟合
+        #     optimizer = torch.optim.Adam(active_params, lr=5e-5, weight_decay=1e-3)
+            
+        #     # 3. 重新配置学习率衰减器
+        #     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.5)
+            
+        #     print("🚀 优化器已重置，跷跷板已被彻底焊死！双分支专家头开始接管比赛！")
+        #     print(f"[{'='*40}]\n")
+
         # Train
         train_loss = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch
