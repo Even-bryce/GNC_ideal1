@@ -18,14 +18,15 @@ SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\checkpoints"
 
 # 2. 真实的训练数据路径
 # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
-DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
+# DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
+DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
 
-START_EPOCH = 41  # 如果从头训练填 1；如果调参直接从第 41 轮开始，填 41
+START_EPOCH = 1  # 如果从头训练填 1；如果调参直接从第 41 轮开始，填 41
 PRETRAINED_CKPT = r"C:\Users\Administrator\Desktop\experiments\checkpoints\ckpt_epoch_40.pth" # 填入你第40轮保存的权重路径
 
 GAMMA = 2
 ALPHA = 0.6
-TOTAL_EPOCHS = 100         
+TOTAL_EPOCHS = 40         
 # ---------------------      
 # ---------------------
 
@@ -42,109 +43,102 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
         criterion.w_bce = 20
         criterion.w_straight = 5
         criterion.w_cost = 4
-        criterion.w_safety = 0.2
+        criterion.w_safety = 0.1
         criterion.delta_s = 0.8
         criterion.delta_d = 0.2
-        criterion.tau_s = 0.4
-        criterion.tau_c = 0.3
-        phase_name = "Refinement (other Loss Active)"
+        criterion.tau_s = 0.5  # 越小越加深点云，不然和focal loss冲突导致总loss上升，理论上应该让惩罚比较少因为要惩罚的冗余点云本身也不应该很多
+        criterion.tau_c = 0.3  # 可以根据成本轻微惩罚低质量点云
+        phase_name = "Refinement"
 
     model.train()
     total_loss = 0.0
     
     # --- Statistics Lists ---
     max_probs, neg_max_probs, neg_fpr_list = [], [], []
-    se_mean_probs, mid_mean_probs = [], []
-    mid_fnr_list = []  # 💡 新增：专门记录中间航路点的漏检率
+    se_mean_probs, mid_mean_probs, mid_fnr_list = [], [], []
+    
+    # 💡 新增：用于存放一个 epoch 内的辅助变量
+    ep_l_str, ep_l_cost = [], []
+    ep_phi_s, ep_phi_c = [], []
 
     for batch_idx, (points, targets, gt_waypoints_list) in enumerate(loader):
         points = points.to(device)
         targets = targets.to(device)
 
-        # 确保 points 是 [B, C, N] 格式
         if points.shape[-1] >= 6:
             points = points.permute(0, 2, 1) 
         
-        # 提取物理坐标用于 Loss: [B, N, 3]
         xyz = points[:, :3, :].permute(0, 2, 1).contiguous()
 
         optimizer.zero_grad()
-        
-        # 1. 模型前向传播 (桥接模式会自动处理 pxo 格式)
         output = model(points) 
-        
-        # 2. 解包 logits
         logits = output[0] if isinstance(output, (tuple, list)) else output
 
-        # 3. 计算复合 Loss
-        loss = criterion(logits, targets, points)
+        # 💡 解包：接收总 loss 和 监控字典
+        loss, metrics = criterion(logits, targets, points)
         
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
+        
+        # 💡 记录到列表
+        ep_l_str.append(metrics["loss_straight"])
+        ep_l_cost.append(metrics["loss_cost"])
+        ep_phi_s.append(metrics["phi_s"])
+        ep_phi_c.append(metrics["phi_c"])
 
-        # --- Monitoring Logic ---
+        # --- 后面的 Monitoring Logic 保持不变 ---
         with torch.no_grad():
             probs = torch.sigmoid(logits)
-            
             if probs.dim() == 3: probs = probs.squeeze(-1)   # [B, N]
             if targets.dim() == 3: targets = targets.squeeze(-1) # [B, N]
 
             max_probs.append(probs.max().item())
             
-            # --- 负样本统计 (误报监控) ---
             neg_mask = (targets < 0.1) 
             if neg_mask.sum() > 0:
                 neg_probs = probs[neg_mask]
                 neg_max_probs.append(neg_probs.max().item())
-                
-                # 误报：真值不是航路点，但预测概率 > 0.5
                 num_false_pos = (neg_probs > 0.5).float().sum()
                 fpr = num_false_pos / neg_probs.numel()
                 neg_fpr_list.append(fpr.item())
 
-            # --- 正样本统计 (漏检监控) ---
             pos_mask = (targets > 0.8)
-            
-            # 自动提取距离特征 (适配起点和终点)
-            if points.shape[1] >= 6:  # 只要总维度够，直接取倒数两列
+            if points.shape[1] >= 6:  
                 f_start = points[:, 3, :]  
                 f_goal  = points[:, 4, :]
-
                 is_start_end = (f_start > 0.95) | (f_goal > 0.95)
-                
                 mask_SE = pos_mask & is_start_end       
                 mask_MID = pos_mask & (~is_start_end)   
 
                 if mask_SE.sum() > 0:
                     se_mean_probs.append(probs[mask_SE].mean().item())
-                
                 if mask_MID.sum() > 0:
                     mid_probs = probs[mask_MID]
                     mid_mean_probs.append(mid_probs.mean().item())
-                    
-                    # 💡 新增：漏检（真值是航路点，但预测概率 < 0.5）
                     num_false_neg = (mid_probs < 0.5).float().sum()
                     fnr = num_false_neg / mid_probs.numel()
                     mid_fnr_list.append(fnr.item())
 
-    # --- Averages ---
+    # --- 计算均值 ---
     avg_neg_max = np.mean(neg_max_probs) if len(neg_max_probs) > 0 else 0.0
     avg_fpr = np.mean(neg_fpr_list) if len(neg_fpr_list) > 0 else 0.0
     avg_se_mean = np.mean(se_mean_probs) if len(se_mean_probs) > 0 else 0.0
     avg_mid_mean = np.mean(mid_mean_probs) if len(mid_mean_probs) > 0 else 0.0
-    avg_mid_fnr = np.mean(mid_fnr_list) if len(mid_fnr_list) > 0 else 0.0  # 💡 新增平均漏检率
+    avg_mid_fnr = np.mean(mid_fnr_list) if len(mid_fnr_list) > 0 else 0.0  
+    
+    # 💡 提取最新的监控指标均值
+    avg_l_str = np.mean(ep_l_str) if len(ep_l_str) > 0 else 0.0
+    avg_l_cost = np.mean(ep_l_cost) if len(ep_l_cost) > 0 else 0.0
+    avg_phi_s = np.mean(ep_phi_s) if len(ep_phi_s) > 0 else 0.0
+    avg_phi_c = np.mean(ep_phi_c) if len(ep_phi_c) > 0 else 0.0
 
-    # 💡 更新打印面板，加入 FNR(漏检)
-    print(f"[Debug Ep{epoch_idx}] {phase_name} | "
-          f"SE:{avg_se_mean:.3f} | "    
-          f"Mid:{avg_mid_mean:.3f} | "  
-          f"NegMax:{avg_neg_max:.3f} | "
-          f"FPR(误报):{avg_fpr:.4f} | "
-          f"FNR(漏检):{avg_mid_fnr:.4f}")         
+    # 💡 输出极度丰富的诊断面板
+    print(f"[Debug Ep{epoch_idx}] {phase_name} |\n"
+          f"  > Probs: SE:{avg_se_mean:.3f} | Mid:{avg_mid_mean:.3f} | NegMax:{avg_neg_max:.3f} | FPR:{avg_fpr:.4f} | FNR:{avg_mid_fnr:.4f}\n"
+          f"  > Graph: Phi_s:{avg_phi_s:.3f} | Phi_c:{avg_phi_c:.3f} | L_str:{avg_l_str:.4f} | L_cost:{avg_l_cost:.4f}") 
 
     return total_loss / len(loader)
-
 class EarlyStopping:
     def __init__(self, patience=15, delta=0.001, save_dir='checkpoints'):
         """
@@ -174,16 +168,10 @@ class EarlyStopping:
                 self.early_stop = True
 
 @torch.no_grad()
+@torch.no_grad()
 def validate(model, loader, criterion, device):
-    """
-    【修复】验证集应使用与训练集一致的 criterion，
-    否则绘制的 Loss 曲线将因为量级差异失去对比意义。
-    """
     model.eval()
     total_loss = 0.0
-
-    # 验证集不需要动态改变直线性权重，可根据需求固定
-    # criterion.w_straight = 5.0 
 
     for points, targets, gt_waypoints_list in loader:
         points = points.to(device)
@@ -197,8 +185,8 @@ def validate(model, loader, criterion, device):
         output = model(points)
         logits = output[0] if isinstance(output, (tuple, list)) else output
 
-        # 使用同样的复合 Loss 计算验证误差
-        loss = criterion(logits, targets, points)
+        # 💡 解包，忽略 metrics
+        loss, _ = criterion(logits, targets, points)
         total_loss += loss.item()
 
     return total_loss / len(loader)
@@ -275,15 +263,15 @@ def main():
         gamma=GAMMA,
         delta_s=0.6,
         delta_d=0.2,
-        r_corridor=0.03,
-        r_local=0.05,
+        r_corridor=0.05,
+        r_local=0.06,
         rho=25600.0,
         # 💡 --- 新增的点对筛选与奖惩参数 ---
         R_nms=0.15,       # 骨架点 NMS 抑制半径
         K_local=3,
         K_pairs=3,       # 局部允许的候选点最大数量 (增加多样性)
         alpha2=2.0,      # 直线 Loss 的指数敏感度
-        alpha3=1.0,      # 成本 Loss 的指数敏感度
+        alpha3=1,      # 成本 Loss 的指数敏感度
         tau_s=0,       # 直线通畅度及格线 (大于奖励，小于惩罚)
         tau_c=0,       # 成本(步长)及格线
         

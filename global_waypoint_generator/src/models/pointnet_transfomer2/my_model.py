@@ -577,6 +577,7 @@ def straightness_loss(p, xyz, f_start, f_goal, delta_s=0.5, R_nms=0.5, K_local=3
     B, N, _ = xyz.shape
     device = xyz.device
     total_loss = []
+    total_phi_s = [] # 💡 新增：记录 phi_s
     
     for b in range(B):
         pb, xb = p[b], xyz[b]
@@ -585,7 +586,6 @@ def straightness_loss(p, xyz, f_start, f_goal, delta_s=0.5, R_nms=0.5, K_local=3
         V_idx, k_star, j_star, has_k, has_j = get_skeleton_and_pairs(
             pb, xb, f_start_b, f_goal_b, delta_s, R_nms, K_local, delta_d, K_pairs
         )
-        
         if V_idx is None: continue
             
         v_xb, v_pb = xb[V_idx], pb[V_idx]
@@ -593,7 +593,6 @@ def straightness_loss(p, xyz, f_start, f_goal, delta_s=0.5, R_nms=0.5, K_local=3
         M = V_idx.shape[0]
         xb_all = xb 
         
-        # 内部函数：寻找最佳邻居 x* 并返回 Q_straight
         def get_best_q_straight(neighbors_idx, has_neighbors, is_prev=True):
             K_actual = neighbors_idx.shape[1]
             phi_s = torch.zeros((M, K_actual), device=device)
@@ -601,15 +600,12 @@ def straightness_loss(p, xyz, f_start, f_goal, delta_s=0.5, R_nms=0.5, K_local=3
             
             valid_mask = has_neighbors
             if not valid_mask.any():
-                return torch.zeros(M, device=device), torch.zeros(M, dtype=torch.bool, device=device)
+                return torch.zeros(M, device=device), torch.zeros(M, dtype=torch.bool, device=device), torch.zeros(M, device=device)
                 
             idx_m, idx_k = torch.nonzero(valid_mask, as_tuple=True)
             n_idx = neighbors_idx[idx_m, idx_k]
+            p1, p2 = v_xb[idx_m], v_xb[n_idx]
             
-            p1 = v_xb[idx_m]
-            p2 = v_xb[n_idx]
-            
-            # --- 算 phi_s ---
             v = p2 - p1
             vv = (v**2).sum(-1, keepdim=True) + eps
             w = xb_all.unsqueeze(0) - p1.unsqueeze(1) 
@@ -623,49 +619,46 @@ def straightness_loss(p, xyz, f_start, f_goal, delta_s=0.5, R_nms=0.5, K_local=3
             N_max = rho * V_corridor + eps
             phi_s[idx_m, idx_k] = torch.exp(alpha2 * (torch.clamp(N_ij / N_max, 0.0, 1.0) - 1.0))
             
-            # --- 算 phi_c (用于联合对抗打分) ---
-            if is_prev:
-                delta_f = v_fs[n_idx] - v_fs[idx_m]
-            else:
-                delta_f = v_fg[n_idx] - v_fg[idx_m]
+            if is_prev: delta_f = v_fs[n_idx] - v_fs[idx_m]
+            else: delta_f = v_fg[n_idx] - v_fg[idx_m]
             phi_c[idx_m, idx_k] = torch.exp(alpha3 * ((delta_f * delta_d) / (dist_ij + eps) - 1.0))
             
             p_x = v_pb[neighbors_idx]
             p_x = torch.where(has_neighbors, p_x, torch.zeros_like(p_x))
             
-            # 💡 联合打分找 x*
             Phi_total = phi_s * phi_c
             joint_score = p_x * Phi_total
             best_idx = torch.argmax(joint_score, dim=1)
             row_idx = torch.arange(M, device=device)
             
-            # 💡 提取 x* 的专属直线得分
             best_phi_s = phi_s[row_idx, best_idx]
             best_p_x = p_x[row_idx, best_idx]
             has_any = has_neighbors.any(dim=1)
             
             Q_s = best_p_x * best_phi_s
-            return Q_s, has_any
+            return Q_s, has_any, best_phi_s # 💡 新增返回 best_phi_s
 
-        Q_s_k, has_any_k = get_best_q_straight(k_star, has_k, is_prev=True)
-        Q_s_j, has_any_j = get_best_q_straight(j_star, has_j, is_prev=False)
+        Q_s_k, has_any_k, phi_s_k = get_best_q_straight(k_star, has_k, is_prev=True)
+        Q_s_j, has_any_j, phi_s_j = get_best_q_straight(j_star, has_j, is_prev=False)
         
         sum_Q = Q_s_k * has_any_k.float() + Q_s_j * has_any_j.float()
+        sum_phi = phi_s_k * has_any_k.float() + phi_s_j * has_any_j.float() # 💡 累加 phi
         num_E = has_any_k.float() + has_any_j.float()
         
         valid_mask = num_E > 0
         if not valid_mask.any(): continue
             
         Q_straight = sum_Q[valid_mask] / num_E[valid_mask]
+        mean_phi_s = (sum_phi[valid_mask] / num_E[valid_mask]).mean() # 💡 计算均值
         p_i_valid = v_pb[valid_mask]
         
-        # 💡 [tau_s - Q_straight]
         loss_b = (p_i_valid * (tau_s - Q_straight.detach())).sum() / valid_mask.sum()
         total_loss.append(loss_b)
+        total_phi_s.append(mean_phi_s) # 💡 记录
 
-    if len(total_loss) == 0: 
-        return torch.tensor(0.0, device=device, requires_grad=True)
-    return torch.stack(total_loss).mean()
+    final_loss = torch.stack(total_loss).mean() if len(total_loss) > 0 else torch.tensor(0.0, device=device, requires_grad=True)
+    final_phi = torch.stack(total_phi_s).mean() if len(total_phi_s) > 0 else torch.tensor(0.0, device=device)
+    return final_loss, final_phi # 💡 返回双变量
 
 def safety_loss(p, xyz, delta_s=0.5, r_local=0.05, rho=20000.0, alpha1=1.0, eps=1e-6, M_max=128):
     B, N, _ = xyz.shape
@@ -725,6 +718,7 @@ def cost_loss(p, xyz, f_start, f_goal, delta_s=0.5, R_nms=0.5, K_local=3, delta_
     B, N, _ = xyz.shape
     device = xyz.device
     total_loss = []
+    total_phi_c = [] # 💡 新增
     
     for b in range(B):
         pb, xb = p[b], xyz[b]
@@ -733,7 +727,6 @@ def cost_loss(p, xyz, f_start, f_goal, delta_s=0.5, R_nms=0.5, K_local=3, delta_
         V_idx, k_star, j_star, has_k, has_j = get_skeleton_and_pairs(
             pb, xb, f_start_b, f_goal_b, delta_s, R_nms, K_local, delta_d, K_pairs
         )
-        
         if V_idx is None: continue
             
         v_xb, v_pb = xb[V_idx], pb[V_idx]
@@ -741,7 +734,6 @@ def cost_loss(p, xyz, f_start, f_goal, delta_s=0.5, R_nms=0.5, K_local=3, delta_
         M = V_idx.shape[0]
         xb_all = xb 
         
-        # 内部函数：寻找最佳邻居 x* 并返回 Q_cost
         def get_best_q_cost(neighbors_idx, has_neighbors, is_prev=True):
             K_actual = neighbors_idx.shape[1]
             phi_s = torch.zeros((M, K_actual), device=device)
@@ -749,15 +741,12 @@ def cost_loss(p, xyz, f_start, f_goal, delta_s=0.5, R_nms=0.5, K_local=3, delta_
             
             valid_mask = has_neighbors
             if not valid_mask.any():
-                return torch.zeros(M, device=device), torch.zeros(M, dtype=torch.bool, device=device)
+                return torch.zeros(M, device=device), torch.zeros(M, dtype=torch.bool, device=device), torch.zeros(M, device=device)
                 
             idx_m, idx_k = torch.nonzero(valid_mask, as_tuple=True)
             n_idx = neighbors_idx[idx_m, idx_k]
+            p1, p2 = v_xb[idx_m], v_xb[n_idx]
             
-            p1 = v_xb[idx_m]
-            p2 = v_xb[n_idx]
-            
-            # --- 算 phi_s (用于联合对抗打分) ---
             v = p2 - p1
             vv = (v**2).sum(-1, keepdim=True) + eps
             w = xb_all.unsqueeze(0) - p1.unsqueeze(1) 
@@ -771,49 +760,46 @@ def cost_loss(p, xyz, f_start, f_goal, delta_s=0.5, R_nms=0.5, K_local=3, delta_
             N_max = rho * V_corridor + eps
             phi_s[idx_m, idx_k] = torch.exp(alpha2 * (torch.clamp(N_ij / N_max, 0.0, 1.0) - 1.0))
             
-            # --- 算 phi_c ---
-            if is_prev:
-                delta_f = v_fs[n_idx] - v_fs[idx_m]
-            else:
-                delta_f = v_fg[n_idx] - v_fg[idx_m]
+            if is_prev: delta_f = v_fs[n_idx] - v_fs[idx_m]
+            else: delta_f = v_fg[n_idx] - v_fg[idx_m]
             phi_c[idx_m, idx_k] = torch.exp(alpha3 * ((delta_f * delta_d) / (dist_ij + eps) - 1.0))
             
             p_x = v_pb[neighbors_idx]
             p_x = torch.where(has_neighbors, p_x, torch.zeros_like(p_x))
             
-            # 💡 联合打分找 x*
             Phi_total = phi_s * phi_c
             joint_score = p_x * Phi_total
             best_idx = torch.argmax(joint_score, dim=1)
             row_idx = torch.arange(M, device=device)
             
-            # 💡 提取 x* 的专属成本得分
             best_phi_c = phi_c[row_idx, best_idx]
             best_p_x = p_x[row_idx, best_idx]
             has_any = has_neighbors.any(dim=1)
             
             Q_c = best_p_x * best_phi_c
-            return Q_c, has_any
+            return Q_c, has_any, best_phi_c # 💡 新增返回 best_phi_c
 
-        Q_c_k, has_any_k = get_best_q_cost(k_star, has_k, is_prev=True)
-        Q_c_j, has_any_j = get_best_q_cost(j_star, has_j, is_prev=False)
+        Q_c_k, has_any_k, phi_c_k = get_best_q_cost(k_star, has_k, is_prev=True)
+        Q_c_j, has_any_j, phi_c_j = get_best_q_cost(j_star, has_j, is_prev=False)
         
         sum_Q = Q_c_k * has_any_k.float() + Q_c_j * has_any_j.float()
+        sum_phi = phi_c_k * has_any_k.float() + phi_c_j * has_any_j.float()
         num_E = has_any_k.float() + has_any_j.float()
         
         valid_mask = num_E > 0
         if not valid_mask.any(): continue
             
         Q_cost = sum_Q[valid_mask] / num_E[valid_mask]
+        mean_phi_c = (sum_phi[valid_mask] / num_E[valid_mask]).mean()
         p_i_valid = v_pb[valid_mask]
         
-        # 💡 [tau_c - Q_cost]
         loss_b = (p_i_valid * (tau_c - Q_cost.detach())).sum() / valid_mask.sum()
         total_loss.append(loss_b)
+        total_phi_c.append(mean_phi_c)
 
-    if len(total_loss) == 0: 
-        return torch.tensor(0.0, device=device, requires_grad=True)
-    return torch.stack(total_loss).mean()
+    final_loss = torch.stack(total_loss).mean() if len(total_loss) > 0 else torch.tensor(0.0, device=device, requires_grad=True)
+    final_phi = torch.stack(total_phi_c).mean() if len(total_phi_c) > 0 else torch.tensor(0.0, device=device)
+    return final_loss, final_phi
 
 class get_loss(nn.Module):
     # 💡 修改 1: 移除了不再需要的 d_max=10.0
@@ -853,13 +839,11 @@ class get_loss(nn.Module):
     def forward(self, logits, targets, points):
         if isinstance(logits, (tuple, list)): logits = logits[0]
         
-        # 1. 处理 points 格式: 确保通道在最后 [B, N, C]
         if points.shape[1] >= 5: 
             points_trans = points.permute(0, 2, 1).contiguous()
         else: 
             points_trans = points.contiguous()
             
-        # 2. 动态提取特征：物理坐标和方向势场特征
         xyz_phys = points_trans[..., :3]
         f_start = points_trans[..., 3]
         f_goal = points_trans[..., 4]
@@ -869,23 +853,30 @@ class get_loss(nn.Module):
         
         loss = 0.0
         
-        # 3. 基础分类 Loss (Focal Loss)
-        # 注意：你需要确保 focal_loss 函数在外部已正确导入
+        # 💡 新增：指标记录字典
+        metrics = {
+            "loss_straight": 0.0,
+            "loss_cost": 0.0,
+            "phi_s": 0.0,
+            "phi_c": 0.0
+        }
+        
         loss += self.w_bce * focal_loss(logits, targets, weights=None, alpha=self.alpha, gamma=self.gamma)
         
-        # 4. 辅助物理约束 Loss
         if self.w_straight > 0:
-            # 💡 交叉传参：为了让 straightness_loss 能联合打分，把 alpha3 也传进去
-            loss += self.w_straight * straightness_loss(
+            l_str, p_s = straightness_loss(
                 p=p, xyz=xyz_phys, f_start=f_start, f_goal=f_goal, 
                 delta_s=self.delta_s, R_nms=self.R_nms, K_local=self.K_local, 
                 delta_d=self.delta_d, K_pairs=self.K_pairs, 
                 r_corridor=self.r_corridor, rho=self.rho, 
                 alpha2=self.alpha2, alpha3=self.alpha3, tau_s=self.tau_s
             )
+            loss += self.w_straight * l_str
+            # 💡 填充字典
+            metrics["loss_straight"] = l_str.item()
+            metrics["phi_s"] = p_s.item()
             
         if self.w_safety > 0:
-            # 安全 loss 不涉及特征场联合选拔，保持原样
             loss += self.w_safety * safety_loss(
                 p=p, xyz=xyz_phys, delta_s=self.delta_s, r_local=self.r_local, 
                 rho=self.rho, alpha1=self.alpha1, M_max=self.M_safe_max
@@ -897,14 +888,16 @@ class get_loss(nn.Module):
             )
             
         if self.w_cost > 0:
-            # 💡 交叉传参：为了让 cost_loss 能联合打分，把 r_corridor, rho, alpha2 也传进去
-            # 同时移除了旧版的 d_max 参数
-            loss += self.w_cost * cost_loss(
+            l_cost, p_c = cost_loss(
                 p=p, xyz=xyz_phys, f_start=f_start, f_goal=f_goal,
                 delta_s=self.delta_s, R_nms=self.R_nms, K_local=self.K_local, 
                 delta_d=self.delta_d, K_pairs=self.K_pairs, 
                 r_corridor=self.r_corridor, rho=self.rho, 
                 alpha2=self.alpha2, alpha3=self.alpha3, tau_c=self.tau_c
             )
+            loss += self.w_cost * l_cost
+            # 💡 填充字典
+            metrics["loss_cost"] = l_cost.item()
+            metrics["phi_c"] = p_c.item()
 
-        return loss
+        return loss, metrics # 💡 返回元组 (总Loss, 监控字典)
