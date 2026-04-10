@@ -390,7 +390,7 @@ if __name__ == '__main__':
     env_results = []
     
     # 规划次数
-    num_of_tests = 500  
+    num_of_tests = 1000  
     # 测评指标
     success_count = 0
     total_time_first = []      # 首次找到路径的总耗时
@@ -459,5 +459,31 @@ if __name__ == '__main__':
         print(f"平均长度: {avg_length_first:.1f}")
     else:
         print("所有任务均失败")
-
     print("=" * 30)
+    
+    if success_count > 0:
+    # 设置直方图参数
+        bins = 'auto'  # 自动选择合适的分组数
+        alpha = 0.7    # 透明度
+        color = 'skyblue'
+        edgecolor = 'black'
+
+        # 绘制直方图
+        plt.figure(figsize=(10, 6))
+        n, bins, patches = plt.hist(total_time_first, bins=bins, alpha=alpha, 
+                                    color=color, edgecolor=edgecolor)
+
+        # 均值线
+        avg_time_first = np.mean(total_time_first)
+        plt.axvline(avg_time_first, color='red', linestyle='dashed', linewidth=1.5,
+                    label=f'average = {avg_time_first:.4f} s')
+
+        # 图表装饰
+        plt.xlabel('time (s)', fontsize=12)
+        plt.ylabel('number', fontsize=12)
+        plt.title('Time of RRT', fontsize=14)
+        plt.legend()
+        plt.grid(axis='y', linestyle='--', alpha=0.6)
+
+        # 显示图形
+        plt.show()

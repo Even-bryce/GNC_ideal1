@@ -17,7 +17,6 @@ class Node:
         self.parent = None      # 节点的父节点，用于回溯路径
         self.cost = 0.0         # 从起点到该节点的路径成本
 
-
 # 定义 RRTStar 类，用于实现 RRT* 算法
 class RRTStar:
     def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=25, max_iter=1500, search_radius=75, search_until_max_iter=True):

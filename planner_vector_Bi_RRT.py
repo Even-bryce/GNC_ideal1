@@ -46,91 +46,77 @@ class RRT:
         """
         # 转换为 (n,3) 数组
         waypoints_array = np.array(self.waypoints)
-        # 去除终点，添加新维度得 [[[x1,y1,z1]],[[x2,y2,z2]],...]
-        node_array = waypoints_array[:-1, np.newaxis, :]
-        # 创建起点Node类列表[[[start]], [[start*]], [[start**]], ...]
-        nodes_list = [[Node(coord[0], coord[1], coord[2])] for coord in node_array[:, 0, :]]
         
-        num_trees = len(nodes_list)
-        # 终点节点列表
-        goal_nodes_list = []
-        for i in range(1, num_trees+1):
-            node = Node(waypoints_array[i, 0], waypoints_array[i, 1], waypoints_array[i, 2])
-            node.parent = None
-            node.cost = float('inf')
-            goal_nodes_list.append(node)
-            
-        first_path_found = np.full(num_trees, False, dtype=bool)
-        first_path = np.full(num_trees, None, dtype=object)
+        num_trees = len(waypoints_array) - 1
+        
+        # 初始化双向树
+        trees_start = []
+        trees_goal = []
+        for i in range(num_trees):
+            start_node = Node(waypoints_array[i,0], waypoints_array[i,1], waypoints_array[i,2])
+            goal_node = Node(waypoints_array[i+1,0], waypoints_array[i+1,1], waypoints_array[i+1,2])
+            goal_node.parent = None
+            trees_start.append([start_node])
+            trees_goal.append([goal_node])
+        
+        path_found = np.full(num_trees, False, dtype=bool)
+        final_paths = [None] * num_trees
         iteration_find_path = np.zeros(num_trees, dtype=int)
         time_first_list = [None] * num_trees
         path_length_list = [None] * num_trees
+        combined_path = []
         
         start_time = time.time()
-        
-        for i in range(self.max_iter):  # 循环执行最大迭代次数
-            node_array = self.build_node_array(nodes_list)
+        for i in range(self.max_iter):
+            start_array = self.build_node_array(trees_start)
+            goal_array = self.build_node_array(trees_goal)
             # 随机采样
             random_nodes_array = self.sample_free_vectorized(waypoints_array)
-
-            # 找到距离随机点最近的已有节点
-            nearest_ind = self.get_nearest_node_index(node_array, random_nodes_array)
-            nearest_nodes_list = [nodes_list[i][nearest_ind[i]] for i in range(len(nearest_ind))]
-            
-            # 计算扩展方向并生成新节点
-            new_nodes_list = self.steer(nearest_nodes_list, random_nodes_array)
-            
+            # 找到最近节点
+            nearest_ind_start = self.get_nearest_node_index(start_array, random_nodes_array)
+            nearest_nodes_start = [trees_start[i][nearest_ind_start[i]] for i in range(num_trees)]
+            # 扩展新节点
+            new_nodes_start = self.steer(nearest_nodes_start, random_nodes_array)
             # 碰撞检测
-            collision_results = self.check_collision_vectorized(nearest_nodes_list, new_nodes_list)
+            collision_results_start = self.check_collision_vectorized(nearest_nodes_start, new_nodes_start)
             
-            # 判断新节点是否可以直连终点
-            goal_collision_results = self.check_collision_vectorized(new_nodes_list, goal_nodes_list)
+            # 连接终点树碰撞检测
+            new_nodes_start_array = np.array([[node.x, node.y, node.z] for node in new_nodes_start])
+            nearest_ind_connect = self.get_nearest_node_index(goal_array, new_nodes_start_array)
+            nearest_nodes_connect = [trees_goal[i][nearest_ind_connect[i]] for i in range(num_trees)]
+            collision_finish_results = self.check_collision_vectorized(new_nodes_start, nearest_nodes_connect)
             
-            # 检查新节点是否与障碍物碰撞
-            for j, node in enumerate(new_nodes_list):
+            for j, node in enumerate(new_nodes_start):
                 # 无碰撞，将新节点加入树
-                if collision_results[j]:
-                    nodes_list[j].append(node)
+                if collision_results_start[j]:
+                    trees_start[j].append(node)
                     
-                # 未找到路径时
-                if not first_path_found[j]:
-                    
+                if not path_found[j]:
                     # 若存在可直连的节点
-                    if goal_collision_results[j] and collision_results[j]:
-                        first_path_found[j] = True
+                    if collision_results_start[j] and collision_finish_results[j]:
+                        path_found[j] = True
                         elapsed = time.time() - start_time
                         time_first_list[j] = elapsed
                         # 生成路径
-                        first_path[j] = self.generate_final_path_from_node(new_nodes_list[j])
-                        # 补充终点
-                        first_path[j].append([goal_nodes_list[j].x, goal_nodes_list[j].y, goal_nodes_list[j].z])
-                        path_length_list[j] = calculate_path_length(first_path[j])
-                        
-                        # 首次找到路径的迭代轮数与时间
+                        start_path = self.generate_final_path_from_node(new_nodes_start[j])          # 从起点到新节点
+                        goal_path_rev = self.generate_final_path_from_node(nearest_nodes_connect[j]) # 从终点到连接节点
+                        goal_path = list(reversed(goal_path_rev))                              # 从连接节点到终点
+                        full_path = start_path + goal_path
+                        final_paths[j] = full_path
+                        path_length_list[j] = calculate_path_length(final_paths[j])
+                        # 首次找到路径的迭代轮数
                         iteration_find_path[j] = i
                         
-                        if all(first_path_found):
+                        if all(path_found):
                             # 合并所有航路段
-                            combined_path = []
-                            for seg in first_path:
+                            for seg in final_paths:
                                 if combined_path and combined_path[-1] == seg[0]:
                                     combined_path.extend(seg[1:])
                                 else:
                                     combined_path.extend(seg)
-                                    
-                            # 找到首次路径就停止
-                            if not self.search_until_max_iter:
-                                return first_path_found, time_first_list, iteration_find_path, path_length_list, combined_path, combined_path
-
-        last_index = None
-        if last_index is not None:
-            # 用剩余迭代次数优化后的路径
-            final_best_path = self.generate_final_path_from_node(last_index)
-            # 补充终点
-            final_best_path.append([self.goal.x, self.goal.y, self.goal.z])
-            return time_first, iteration_find_path, first_path, final_best_path 
-
-        return None, None, None, None
+                            return path_found, time_first_list, iteration_find_path, path_length_list, combined_path
+            trees_start, trees_goal = trees_goal, trees_start 
+        return path_found, time_first_list, iteration_find_path, path_length_list, None   
     
     def build_node_array(self, nodes_list):
         max_len = max(len(tree) for tree in nodes_list)
@@ -227,61 +213,89 @@ class RRT:
             new_nodes.append(new_node)
         return new_nodes
     
-    def check_collision_vectorized(self, nearest_nodes_lists, new_nodes_list, m = 50):
+    def check_collision_vectorized(self, nearest_nodes_lists, new_nodes_list, m=50):
         """
-        向量化碰撞检测函数
-        :param nearest_nodes_lists: (N-1,)的节点列表
-        :param new_nodes_list: (N-1,)的节点列表
-        :param m: 每条线段的采样点数量
-        :return: (N-1,)的结果列表，True为无碰撞，False为有碰撞
+        优化版向量化碰撞检测：每个航段只检测其空间范围内的障碍物
+        :param nearest_nodes_lists: 起点节点列表 (N-1,)
+        :param new_nodes_list: 终点节点列表 (N-1,)
+        :param m: 每条线段内部的采样点数（不含端点）
+        :return: (N-1,) 布尔列表，True表示无碰撞
         """
-        N_minus_1 = len(nearest_nodes_lists)
+        N = len(nearest_nodes_lists)
         
-        # 转换为 (N-1, 3) 数组
-        nearest_coords = np.array([[node.x, node.y, node.z] for node in nearest_nodes_lists])
-        new_coords = np.array([[node.x, node.y, node.z] for node in new_nodes_list])
+        # 转换为 (N,3) 坐标数组
+        starts = np.array([[node.x, node.y, node.z] for node in nearest_nodes_lists])
+        ends   = np.array([[node.x, node.y, node.z] for node in new_nodes_list])
         
-        # 在连线上均匀采样 m 个点，包含首尾共 m+2 个检测点
-        t_values = np.linspace(0, 1, m + 2)
-
-        # 插值: (1-t) * nearest + t * new，得到 (N-1, m+2, 3) 的采样点
-        t_expanded = t_values[np.newaxis, :, np.newaxis]
-        sample_points = (1 - t_expanded) * nearest_coords[:, np.newaxis, :] + t_expanded * new_coords[:, np.newaxis, :]
+        # 每个航段的包围盒
+        mins = np.minimum(starts, ends)
+        maxs = np.maximum(starts, ends)
         
-        # 展平为 ((N-1)*(m+2), 3) = (N_samples, 3)
-        flat_samples = sample_points.reshape(-1, 3)
-
-        # 障碍物参数： (num_obstacles,)
-        obstacle_array = np.array(self.obstacle_list)
-        obs_x = obstacle_array[:, 0]
-        obs_y = obstacle_array[:, 1]
-        obs_zmin = obstacle_array[:, 2]
-        obs_zmax = obstacle_array[:, 3]
-        obs_radius = obstacle_array[:, 4]
-
-        # 每个采样点到每个障碍物中心的水平距离： (N_samples, num_obstacles)
-        dx = flat_samples[:, 0, np.newaxis] - obs_x[np.newaxis, :]
-        dy = flat_samples[:, 1, np.newaxis] - obs_y[np.newaxis, :]
-        horizontal_dist_sq = dx**2 + dy**2
+        # 障碍物参数
+        obs = np.array(self.obstacle_list)
+        obs_x = obs[:, 0]
+        obs_y = obs[:, 1]
+        obs_zmin = obs[:, 2]
+        obs_zmax = obs[:, 3]
+        obs_r = obs[:, 4]
+        O = len(obs)
         
-        # 比较水平距离与碰撞半径: (N_samples, num_obstacles)
-        in_horizontal = horizontal_dist_sq <= (obs_radius[np.newaxis, :]**2)
+        # 障碍物包围盒
+        obs_xmin = obs_x - obs_r
+        obs_xmax = obs_x + obs_r
+        obs_ymin = obs_y - obs_r
+        obs_ymax = obs_y + obs_r
         
-        # 比较采样点纵坐标与垂直高度: (N_samples, num_obstacles)
-        z = flat_samples[:, 2, np.newaxis]
-        in_vertical = (z >= obs_zmin[np.newaxis, :]) & (z <= obs_zmax[np.newaxis, :])
+        # 航段与障碍物的包围盒重叠检测（全向量化）
+        # 形状 (N, O)
+        overlap_x = (maxs[:, 0:1] >= obs_xmin) & (mins[:, 0:1] <= obs_xmax)
+        overlap_y = (maxs[:, 1:2] >= obs_ymin) & (mins[:, 1:2] <= obs_ymax)
+        overlap_z = (maxs[:, 2:3] >= obs_zmin) & (mins[:, 2:3] <= obs_zmax)
+        overlap = overlap_x & overlap_y & overlap_z   # True 表示该航段可能与障碍物碰撞
         
-        # 每个采样点在每个障碍物内: (N_samples, num_obstacles)
-        in_obstacle = in_horizontal & in_vertical
+        # 采样参数
+        t_vals = np.linspace(0, 1, m + 2)
+        t_exp = t_vals[np.newaxis, :, np.newaxis]
         
-        # 每个采样点在任意障碍物内: (N_samples,)
-        any_obstacle = np.any(in_obstacle, axis=1)
+        # 初始化：无碰撞
+        no_collision = np.ones(N, dtype=bool)
         
-        # 重塑为 (N-1, m+2)
-        collision_by_pair = any_obstacle.reshape(N_minus_1, m + 2)
-        
-        # 每对节点是否有碰撞：(N-1,)
-        no_collision = ~np.any(collision_by_pair, axis=1)
+        # 对每个障碍物单独处理
+        for j in range(O):
+            # 需要检测该障碍物的航段索引
+            seg_idx = np.where(overlap[:, j])[0]
+            if len(seg_idx) == 0:
+                continue
+            
+            # 取出这些航段的起终点
+            start_j = starts[seg_idx]      # (k,3)
+            end_j   = ends[seg_idx]        # (k,3)
+            
+            # 生成这些航段上的采样点 (k, m+2, 3)
+            sample_j = (1 - t_exp) * start_j[:, np.newaxis, :] + t_exp * end_j[:, np.newaxis, :]
+            flat_j = sample_j.reshape(-1, 3)   # (k*(m+2), 3)
+            
+            # 对该障碍物进行碰撞检测
+            dx = flat_j[:, 0] - obs_x[j]
+            dy = flat_j[:, 1] - obs_y[j]
+            dist2_horiz = dx*dx + dy*dy
+            in_horiz = dist2_horiz <= obs_r[j]*obs_r[j]
+            
+            z = flat_j[:, 2]
+            in_vert = (z >= obs_zmin[j]) & (z <= obs_zmax[j])
+            
+            in_obs = in_horiz & in_vert
+            
+            # 重塑为 (k, m+2)，并判断每个航段是否有碰撞
+            coll_j = in_obs.reshape(len(seg_idx), m+2)
+            any_coll = np.any(coll_j, axis=1)   # 长度为k的布尔数组
+            
+            # 更新结果：如果当前障碍物导致某航段碰撞，则标记为False
+            no_collision[seg_idx] &= ~any_coll
+            
+            # 若所有航段均已确定碰撞，可提前退出（可选）
+            if not np.any(no_collision):
+                break
         
         return no_collision.tolist()
     
@@ -360,7 +374,7 @@ if __name__ == '__main__':
     env_results = []
     
     # 规划次数
-    num_of_tests = 500  
+    num_of_tests = 1000  
     # 测评指标
     success_count = 0
     total_time_first = []      # 首次找到路径的总耗时
@@ -381,15 +395,15 @@ if __name__ == '__main__':
             max_iter=1000
         )
         start_time = time.time()
-        first_path_found, time_first, iteration_find_path, path_length_list, first_path, final_best_path = rrt_star.planning()
+        first_path_found, time_first, iteration_find_path, path_length_list, first_path = rrt_star.planning()
         end_time = time.time()
         
         # 打印单次结果
-        num_segments = len(first_path_found)
+        num_trees = len(first_path_found)
         print("-" * 50)
         print(f"{'航段':<4} | {'状态':<4} | {'迭代轮次':<3} | {'规划时间':<4} | {'路径长度':<4}")
         print("-" * 50)
-        for i in range(num_segments):
+        for i in range(num_trees):
             success = first_path_found[i]
             status = "成功" if success else "失败"
             # 迭代轮次
@@ -431,3 +445,30 @@ if __name__ == '__main__':
         print("所有任务均失败")
 
     print("=" * 30)
+    
+    if success_count > 0:
+    # 设置直方图参数
+        bins = 'auto'  # 自动选择合适的分组数
+        alpha = 0.7    # 透明度
+        color = 'skyblue'
+        edgecolor = 'black'
+
+        # 绘制直方图
+        plt.figure(figsize=(10, 6))
+        n, bins, patches = plt.hist(total_time_first, bins=bins, alpha=alpha, 
+                                    color=color, edgecolor=edgecolor)
+
+        # 均值线
+        avg_time_first = np.mean(total_time_first)
+        plt.axvline(avg_time_first, color='red', linestyle='dashed', linewidth=1.5,
+                    label=f'average = {avg_time_first:.4f} s')
+
+        # 图表装饰
+        plt.xlabel('time (s)', fontsize=12)
+        plt.ylabel('number', fontsize=12)
+        plt.title('Time of Bi_RRT', fontsize=14)
+        plt.legend()
+        plt.grid(axis='y', linestyle='--', alpha=0.6)
+
+        # 显示图形
+        plt.show()
