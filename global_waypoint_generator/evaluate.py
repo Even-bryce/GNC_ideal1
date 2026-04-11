@@ -390,7 +390,7 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
                 map_dim=map_dim, eps=cluster_eps, peak_radius=peak_radius
             )
 
-            if i <= 10:
+            if i <= 0:
                 visualize_result(
                     xyz_vis, target_vis, prob_vis, 
                     start_pt, goal_pt, gt_mid_waypoints, pred_mid_waypoints, true_mid_wps,

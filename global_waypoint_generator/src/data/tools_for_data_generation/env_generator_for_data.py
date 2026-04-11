@@ -1,7 +1,7 @@
 import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
-from res_show_for_data import plot_map
+from .res_show_for_data import plot_map
 import random
 
 def env_generator(
@@ -289,15 +289,15 @@ def env_generator_cluster(
 # -------测试-------
 if __name__ == "__main__":
 
-    # env_map = env_generator(
-    #     rho=0.5,
-    #     map_dim=(1500, 1500, 240),
-    #     r_crash_range=(80, 125),
-    #     r_risk_range=(15, 30),
-    #     zmax_range=(240, 240),
-    #     max_iter=5000,
-    #     seed=40
-    # )
+    env_map = env_generator(
+            rho=random.uniform(0.6, 0.85),   # 数据更丰富不容易出现过拟合
+            map_dim=(1500, 1500, 240),
+            r_crash_range=(30, 50),
+            r_risk_range=(3, 7),
+            zmax_range=(30, 240),
+            max_iter=5000,
+            seed=42
+        )
 
     # env_map = env_generator_maze(
     #     grid_size=(4, 4),           # 4x4的网格，网格越多通道越窄越复杂
@@ -308,16 +308,16 @@ if __name__ == "__main__":
     #     seed=42
     # )
 
-    env_map = env_generator_cluster(
-    map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
-    num_clusters=20,             # 建议 10~15 之间，保证有足够空间
-    chain_length_range=(1, 4),   # 每个簇的圆柱体数量
-    r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
-    r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
-    r_risk_range=(10, 20),       # 风险半径偏移量
-    zmax_range=(240, 240),
-    min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
-    seed=None,
-)
+#     env_map = env_generator_cluster(
+#     map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
+#     num_clusters=20,             # 建议 10~15 之间，保证有足够空间
+#     chain_length_range=(1, 4),   # 每个簇的圆柱体数量
+#     r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
+#     r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
+#     r_risk_range=(10, 20),       # 风险半径偏移量
+#     zmax_range=(240, 240),
+#     min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
+#     seed=None,
+# )
 
     plot_map(env_map)
