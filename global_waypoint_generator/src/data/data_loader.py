@@ -10,72 +10,59 @@ class PathPointDataset(Dataset):
         return len(self.data_files)
 
     def __getitem__(self, idx):
-        # 加载数据
         data = np.load(self.data_files[idx])
-
-        # points shape: [N, D] (前3维是xyz，后D-3维是特征)
-        points = torch.from_numpy(data['points']).float() 
         
-        # labels shape: [N, 1]
+        # points: [N, D], target: [N, 1], waypoints: [M, 3]
+        points = torch.from_numpy(data['points']).float() 
         target = torch.from_numpy(data['labels']).float()
-
-        # ==========================================
-        # [新增] 提取真实航路点 (包含起终点)
-        # waypoints shape: [M, 3] (M 是不固定的)
-        # ==========================================
         waypoints = torch.from_numpy(data['waypoints']).float()
 
         return points, target, waypoints
 
 def collate_fn(batch):
     """
-    处理变长点云的 Padding
-    返回:
-        points_batch:  [B, N_max, D]
-        targets_batch: [B, N_max, 1]
-        waypoints_list: 一个长度为 B 的 list，里面每个元素是 [M, 3] 的 Tensor
+    修复后的 collate_fn：
+    1. 动态计算当前 Batch 的最大长度 N_max
+    2. 生成 points_batch, targets_batch
+    3. 生成 mask_batch (True表示真点，False表示padding)
     """
-    # batch[i][0] 是 points, batch[i][1] 是 target, batch[i][2] 是 waypoints
+    # 获取当前 batch 中最大的点数
     N_max = max(item[0].shape[0] for item in batch)
+    B = len(batch)
+    D = batch[0][0].shape[1] # 特征维度
 
-    points_list = []
-    targets_list = []
-    waypoints_list = []  # [新增] 专门用来装变长航路点
+    # 预先分配内存（比不断 cat 效率更高）
+    # points_batch 初始化为 0
+    points_batch = torch.zeros(B, N_max, D)
+    # targets_batch 初始化为 0 或 -1 (取决于你的 Loss 处理)
+    targets_batch = torch.zeros(B, N_max, 1)
+    # mask_batch 初始化为 False (或 0)
+    mask_batch = torch.zeros(B, N_max, dtype=torch.bool)
 
-    for points, target, waypoints in batch:
+    waypoints_list = []
+
+    for i, (points, target, waypoints) in enumerate(batch):
         N = points.shape[0]
-        pad_n = N_max - N
-
-        if pad_n > 0:
-            C = points.shape[1] 
-            points_pad = torch.cat([points, torch.zeros(pad_n, C, device=points.device)], dim=0)
-            target_pad = torch.cat([target, torch.zeros(pad_n, 1)], dim=0)
-        else:
-            points_pad = points
-            target_pad = target
-
-        points_list.append(points_pad)
-        targets_list.append(target_pad)
         
-        # [新增] 直接把没做任何修改的 waypoints 塞进列表
+        # 填充数据
+        points_batch[i, :N, :] = points
+        targets_batch[i, :N, :] = target
+        
+        # 设置有效区域的掩码为 True
+        mask_batch[i, :N] = True
+        
+        # 变长航路点依然保留在 list 中
         waypoints_list.append(waypoints)
 
-    # 堆叠网络需要的输入
-    points_batch = torch.stack(points_list)    # [B, N_max, D]
-    targets_batch = torch.stack(targets_list)  # [B, N_max, 1]
-
-    # 注意这里返回了三个变量！
-    return points_batch, targets_batch, waypoints_list
+    return points_batch, targets_batch, mask_batch, waypoints_list
 
 def build_dataloader(data_files, batch_size=8, shuffle=True, num_workers=0):
-    # Windows下 num_workers 建议设为 0，Linux 可设为 4
     dataset = PathPointDataset(data_files)
-
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         collate_fn=collate_fn,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=True # 开启以加速 CPU 到 GPU 的数据传输
     )

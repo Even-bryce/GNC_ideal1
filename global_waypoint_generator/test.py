@@ -10,6 +10,8 @@ from src.models.pointnet_transfomer2.my_model import get_model
 from scipy.spatial import KDTree
 from sklearn.cluster import DBSCAN
 import torch
+from scipy.stats import qmc
+import os
 # 定义 Node 类，用于表示树中的每个节点
 class Node:
     def __init__(self, x, y, z):
@@ -1244,6 +1246,61 @@ def filter_zigzag_waypoints(start_pt, goal_pt, mid_wps, min_dist=0.03, local_thr
         
     return filtered_wps
 
+def filter_waypoints_los_pruning(start_pt, goal_pt, mid_wps, obstacles, 
+                                 max_jump=800.0, max_cols=1, r_crash=1.2):
+    """
+    基于起终点预排序与视线剪枝 (LoS Pruning) 的航路点过滤。
+    像拉紧橡皮筋一样，只要两点之间直连的障碍物在容忍范围内，就直接跳过中间的冗余点。
+    """
+    if len(mid_wps) == 0:
+        return np.empty((0, 3))
+
+    # 1. 按照起终点距离特征进行预排序 (决定了“皮筋”的初始形态)
+    d_s = np.linalg.norm(mid_wps - start_pt, axis=1)
+    d_g = np.linalg.norm(mid_wps - goal_pt, axis=1)
+    sort_idx = np.argsort(d_s / (d_s + d_g + 1e-6))
+    sorted_wps = mid_wps[sort_idx]
+
+    # 将起点、排序后的中间点、终点串成一条初始路径
+    path = [start_pt] + list(sorted_wps) + [goal_pt]
+
+    # 2. 贪心视线剪枝 (从头开始，尽可能往远看)
+    i = 0
+    while i < len(path) - 2:
+        shortcut_found = False
+        
+        # 从当前点 i 开始，倒序寻找尽可能远的后续点 j
+        for j in range(len(path) - 1, i + 1, -1):
+            dist = np.linalg.norm(path[j] - path[i])
+            
+            # 限制1：跨度太大不安全，不跳跃
+            if dist > max_jump:
+                continue
+                
+            # 限制2：物理碰撞检测 (允许轻微穿透 max_cols)
+            test_line = np.array([path[i], path[j]])
+            cols = count_path_collisions(test_line, obstacles, r_agent_crash=r_crash)
+            
+            if cols <= max_cols:
+                # 💡 核心逻辑：找到了一条足够干净的捷径！
+                # 剔除 i 和 j 之间所有的冗余航路点
+                del path[i+1 : j]
+                shortcut_found = True
+                break # 捷径生效，跳出内层循环，以新的 j (现在变成了 i+1) 为起点继续往后看
+                
+        # 如果从 i 往后看，怎么都找不到捷径，就老老实实走到下一个相邻点
+        if not shortcut_found:
+            i += 1
+
+    # 3. 提取剪枝后的中间航路点 (掐头去尾)
+    filtered_wps = np.array(path[1:-1])
+    
+    # 防爆保底
+    if len(filtered_wps) == 0:
+        return np.empty((0, 3))
+        
+    return filtered_wps
+
 def generate_point_cloud_features(S, G, map_dim, obstacles, N_attempts=4096):
     """
     极速向量化版的点云采样与 9 维特征构造函数
@@ -1256,7 +1313,13 @@ def generate_point_cloud_features(S, G, map_dim, obstacles, N_attempts=4096):
     eps = 1e-8
 
     # 随机撒点
-    candidates = np.random.uniform(xyz_min, xyz_max, size=(N_attempts, 3))
+    sampler = qmc.Sobol(d=3, scramble=True) 
+    
+    # 最好使用 2 的幂次方来最大化均匀性，不过 N_attempts=4096 刚好是 2^12，非常完美
+    sobol_norm = sampler.random_base2(m=int(np.log2(N_attempts))) 
+    
+    # 将 [0, 1] 的均匀点映射到真实的物理地图尺度上
+    candidates = xyz_min + sobol_norm * (xyz_max - xyz_min)
     
     # 提取障碍物矩阵
     obs_arr = np.array(obstacles, dtype=np.float32)
@@ -1325,6 +1388,11 @@ def generate_point_cloud_features(S, G, map_dim, obstacles, N_attempts=4096):
         d_obs_norm, 
         obs_normals[:, 0], obs_normals[:, 1], obs_normals[:, 2]
     ], axis=1).astype(np.float32)
+
+    # features_9d = np.stack([
+    #     xyz_norm[:, 0], xyz_norm[:, 1], xyz_norm[:, 2], 
+    #     d_g / (d_s + d_g + eps), d_s / (d_s + d_g + eps)
+    # ], axis=1).astype(np.float32)
     
     # 返回主程序所需的所有变量
     return features_9d, xyz, xyz_norm, center, scale
@@ -1548,7 +1616,161 @@ def plot_uav_comparison(env_map, final_waypoints, final_path_vec, final_path_rrt
     plt.tight_layout()
     plt.show()
 
-# ==========================================
+def visualize_point_cloud_scores(
+    xyz, 
+    scores_np, 
+    S, 
+    G, 
+    map_dim, 
+    final_waypoints=None, 
+    test_id="Unknown", 
+    threshold=0.5,       # ⭐ 新增: 用于过滤显示高分点的阈值
+    show_plot=True, 
+    save_path=None
+):
+    """
+    可视化 3D 点云、网络打分以及提取的路径 (采用 jet 色带与分层渲染)。
+    """
+    Lx, Ly, Lz = map_dim
+    
+    # 初始化画布
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # 定义高亮散点图参数
+    scatter_kwargs = {
+        'cmap': 'jet', 's': 20, 'vmin': 0.0, 'vmax': 1.0, 
+        'alpha': 0.5, 'edgecolor': 'none' 
+    }
+
+    # 1. 绘制全局背景点云 (暗灰色)
+    ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], c='gray', s=1, alpha=0.05)
+
+    # 2. 过滤并绘制高分热力点云
+    mask = scores_np > threshold
+    pred_points = xyz[mask]
+    pred_colors = scores_np[mask]
+
+    if len(pred_points) > 0:
+        sc = ax.scatter(pred_points[:, 0], pred_points[:, 1], pred_points[:, 2], 
+                        c=pred_colors, label=f'Pred Heatmap (>{threshold})', **scatter_kwargs)
+        # 添加颜色条
+        cbar = plt.colorbar(sc, ax=ax, pad=0.1, shrink=0.7)
+        cbar.set_label('Probability / Confidence Score', fontsize=12)
+
+    # 3. 绘制起点和终点 (大方块带黑边)
+    ax.scatter(S[0], S[1], S[2], c='green', s=150, marker='s', edgecolor='black', label='Start (S)')
+    ax.scatter(G[0], G[1], G[2], c='blue', s=150, marker='s', edgecolor='black', label='Goal (G)')
+
+    # 4. 绘制骨干路点及连线
+    if final_waypoints is not None and len(final_waypoints) > 0:
+        # 画出连线
+        ax.plot(final_waypoints[:, 0], final_waypoints[:, 1], final_waypoints[:, 2], 
+                c='orange', linewidth=2, label='Extracted Path')
+        
+        # 如果路点包含中间点 (掐头去尾，去掉起点和终点)，则用洋红五角星标出
+        if len(final_waypoints) > 2:
+            mid_wps = final_waypoints[1:-1]
+            ax.scatter(mid_wps[:, 0], mid_wps[:, 1], mid_wps[:, 2],
+                       c='magenta', s=150, marker='*', edgecolor='black', label='Pred Mid WPs')
+
+    # 设置坐标轴范围与标题
+    ax.set_xlim([0, Lx])
+    ax.set_ylim([0, Ly])
+    ax.set_zlim([0, Lz])
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title(f'Test [{test_id}] - 3D Point Cloud Prediction', fontsize=14)
+    
+    # ⭐ 调整与参考代码一致的默认观测视角
+    ax.view_init(elev=30, azim=-60)
+    
+    # 把图例放到外面一点避免遮挡
+    ax.legend(loc='upper right', bbox_to_anchor=(1.1, 1))
+
+    # 处理保存逻辑
+    if save_path:
+        save_dir = os.path.dirname(save_path)
+        if save_dir and not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+        plt.savefig(save_path, dpi=150, bbox_inches='tight') # bbox_inches 保证图例不被裁掉
+    
+    # 处理显示逻辑
+    if show_plot:
+        plt.show()
+        
+    # 清理内存
+    plt.close(fig)
+
+def visualize_filter_comparison(S, G, raw_wps, filtered_wps, obstacles, map_dim, save_path=None):
+    """
+    可视化视线剪枝前后的航路点对比，并绘制圆柱体障碍物
+    (已完美对齐 obstacles 数据格式并采用兼容的 plot_surface 写法)
+    """
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection='3d')
+    Lx, Ly, Lz = map_dim
+
+    # --- 1. 设置真实物理比例 ---
+    ax.set_box_aspect((Lx, Ly, Lz)) 
+
+    # --- 2. 绘制障碍物 (完全仿照你的写法) ---
+    if len(obstacles) > 0:
+        for obs in obstacles:
+            # 严格按照你的解包顺序
+            cx, cy, zmin, zmax, r_crash = obs[0], obs[1], obs[2], obs[3], obs[4]
+            
+            # 构建圆柱体网格
+            theta = np.linspace(0, 2*np.pi, 20)
+            x_circle = r_crash * np.cos(theta) + cx
+            y_circle = r_crash * np.sin(theta) + cy
+            
+            # 将圆周坐标转为网格
+            X = np.tile(x_circle, (2, 1))
+            Y = np.tile(y_circle, (2, 1))
+            Z = np.array([np.ones(20)*zmin, np.ones(20)*zmax])
+
+            # 绘制表面，使用你验证过的安全参数
+            ax.plot_surface(X, Y, Z, color='cyan', alpha=0.2, shade=False, edgecolor='darkcyan', linewidth=0.5)
+
+    # --- 3. 绘制过滤前的原始候选航路点 (半透明粉色) ---
+    if len(raw_wps) > 0:
+        ax.scatter(raw_wps[:, 0], raw_wps[:, 1], raw_wps[:, 2], 
+                   c='pink', marker='o', s=40, label='Raw WPs (Dropped)', alpha=0.6)
+
+    # --- 4. 绘制保留下来的航路点与最终剪枝路径 ---
+    if len(filtered_wps) > 0:
+        final_path = np.vstack([S[None], filtered_wps, G[None]])
+        ax.scatter(filtered_wps[:, 0], filtered_wps[:, 1], filtered_wps[:, 2], 
+                   c='magenta', marker='*', s=200, edgecolor='black', label='Filtered WPs (Kept)', zorder=5)
+    else:
+        final_path = np.vstack([S[None], G[None]])
+        
+    ax.plot(final_path[:, 0], final_path[:, 1], final_path[:, 2], 
+            c='orange', linewidth=2.5, label='Pruned Path', zorder=4)
+
+    # --- 5. 绘制起终点 ---
+    ax.scatter(S[0], S[1], S[2], c='green', marker='s', s=150, edgecolor='black', label='Start (S)', zorder=6)
+    ax.scatter(G[0], G[1], G[2], c='blue', marker='s', s=150, edgecolor='black', label='Goal (G)', zorder=6)
+
+    # --- 6. 坐标轴设置 ---
+    ax.set_xlim([0, Lx])
+    ax.set_ylim([0, Ly])
+    ax.set_zlim([0, Lz])
+    ax.set_xlabel('X (m)')
+    ax.set_ylabel('Y (m)')
+    ax.set_zlabel('Z (m)')
+    ax.set_title('Line-of-Sight Pruning Comparison', fontsize=14)
+    ax.legend(loc='upper right')
+
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight')
+    else:
+        plt.show()
+        
+    # ⭐ 依然保留强制清理内存，避免批量测试时报错
+    plt.close(fig)
 # 3. 主程序流水线
 # ==========================================
 if __name__ == '__main__':
@@ -1572,7 +1794,8 @@ if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_model(num_classes=1, input_dim=9, dropout_p=0.0).to(device) 
     # model_path = r"C:\Users\Administrator\Desktop\experiments\best_model_for_trian_data5\best_model.pth"
-    model_path = r"C:\Users\Administrator\Desktop\experiments\best_model_for_train_data6\best_model.pth"
+    # model_path = r"C:\Users\Administrator\Desktop\experiments\best_model_for_train_data6_2\best_model.pth"
+    model_path = r"C:\Users\Administrator\Desktop\experiments\checkpoints\best_model.pth"
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     
@@ -1586,7 +1809,7 @@ if __name__ == '__main__':
     # ==========================================
     # ⭐ 阶段 1: 批量测试参数初始化
     # ==========================================
-    num_tests = 5
+    num_tests = 15
     
     # 时间统计
     sum_time_step2_feat = 0.0
@@ -1639,6 +1862,7 @@ if __name__ == '__main__':
                     min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
                     seed=None,
                 )
+
         Lx, Ly, Lz = env_map["map_dim"]
         obstacles = env_map["obstacles"]
         scale = max(Lx, Ly, Lz)
@@ -1687,12 +1911,31 @@ if __name__ == '__main__':
             )
             if len(extracted_wps_norm) > 0:
                 extracted_wps_physical = extracted_wps_norm * scale + center
-                sorted_wps = filter_zigzag_waypoints(
-                    start_pt=S, goal_pt=G, mid_wps=extracted_wps_physical,
-                    min_dist=0.05 * scale, local_thresh=0.2 * scale, max_turn_angle=60.0
+                
+                sorted_wps = filter_waypoints_los_pruning(
+                                start_pt=S, 
+                                goal_pt=G, 
+                                mid_wps=extracted_wps_physical,
+                                obstacles=obstacles, 
+                                max_jump=600.0, 
+                                max_cols=2,      # 允许最多穿透2个障碍物边缘（交由后续RRT避障）
+                                r_crash=1.2
+                            )
+                # sorted_wps = extracted_wps_physical
+
+                visualize_filter_comparison(
+                    S=S, G=G, 
+                    raw_wps=extracted_wps_physical, 
+                    filtered_wps=sorted_wps, 
+                    obstacles=obstacles, 
+                    map_dim=(Lx, Ly, Lz),
+                    save_path=None  # 改成具体的路径可以自动存图
                 )
-            else: sorted_wps = np.empty((0, 3))
-        else: sorted_wps = np.empty((0, 3))
+            else: 
+                sorted_wps = np.empty((0, 3))
+        else: 
+            sorted_wps = np.empty((0, 3))
+        
 
         final_waypoints = np.vstack([S[None], sorted_wps, G[None]])
         t4_end = time.time()
@@ -1711,6 +1954,7 @@ if __name__ == '__main__':
             sum_obs_collision_ratio += col_ratio
             
             valid_wp_count += 1
+            print(f"原始网络提取的航路点（含起终点）:{len(extracted_wps_physical) + 2}")
             print(f"  ├─ 网络生成航路点数量: {len(final_waypoints)}, 总长: {wp_path_length:.2f}m, 穿障率: {col_ratio*100:.1f}% ({collisions}/{num_obs})")
         else:
             print("  ├─ 网络未能生成有效航路点")
@@ -1747,6 +1991,20 @@ if __name__ == '__main__':
             failed_segs = [i for i, found in enumerate(found_status) if not found]
             print(f"  ├─ 向量化RRT规划失败! 耗时: {vec_time_cost:.3f}s, 未连通航段: {failed_segs}")
 
+        save_filepath = None 
+        
+        visualize_point_cloud_scores(
+            xyz=xyz, 
+            scores_np=scores_np, 
+            S=S, 
+            G=G, 
+            map_dim=(Lx, Ly, Lz), 
+            final_waypoints=final_waypoints, 
+            test_id=f"{i+1}/{num_tests}", 
+            show_plot=True,            # 是否弹窗显示
+            save_path=save_filepath    # 是否保存到本地
+        )
+
 
         # ----------------------------------
         # 5. 标准 RRT* 规划对比测试
@@ -1775,7 +2033,7 @@ if __name__ == '__main__':
         else:
             print(f"  └─ 标准RRT*规划失败! 耗时: {trrt_end - trrt_start:.3f}s")
     
-        if i <= 2:
+        if i <= 15:
             plot_uav_comparison(
                 env_map=env_map, 
                 final_waypoints=final_waypoints, 

@@ -441,12 +441,9 @@ class PointTransformerSeg(nn.Module):
 # ==========================================
 
 class get_model(nn.Module):
-    def __init__(self, num_classes, input_dim=8,dropout_p=0):
+    def __init__(self, num_classes, input_dim=8, dropout_p=0):
         super(get_model, self).__init__()
         self.input_dim = input_dim
-        
-        # 实例化官方 Backbone，使用标准的块数分布
-        # c = 你的总输入维度 (比如 8)。k = num_classes (你的任务应该是 1)
         self.backbone = PointTransformerSeg(
             block=PointTransformerBlock, 
             blocks=[2, 3, 4, 6, 3], 
@@ -455,36 +452,54 @@ class get_model(nn.Module):
             dropout_p=dropout_p
         )
 
-    def forward(self, xyz):
+    # 💡 1. 接收 DataLoader 传来的 mask
+    def forward(self, xyz, mask=None):
         """
-        完美兼容你原来的输入输出格式:
-        输入 xyz: [B, input_dim, N] 
-        输出 out: [B, N, num_classes] (通常 num_classes=1)
+        xyz: [B, input_dim, N] 
+        mask: [B, N] (True 表示真实点, False 表示 Padding 点)
         """
         B, C_in, N = xyz.shape
         device = xyz.device
         
-        # 1. 转换维度: [B, C, N] -> [B, N, C]
         xyz_trans = xyz.permute(0, 2, 1).contiguous()
         
-       # 2. 高效压平为 pxo 格式
-        # 加上 .contiguous() 强制在显存中开辟一块紧凑的连续内存
-        p = xyz_trans[..., :3].contiguous().view(B * N, 3)
+        if mask is None:
+            # 兼容旧代码，如果没有传mask，假定全是有效点
+            mask = torch.ones((B, N), dtype=torch.bool, device=device)
+
+        # ==========================================
+        # 💡 核心魔法：数据浓缩 (剥离 Padding)
+        # ==========================================
+        # 直接利用 mask 提取所有真实点，打破 Batch 边界
+        # valid_xyz 形状变为 [N_total_valid, C_in] (全 Batch 所有真实点的总和)
+        valid_xyz = xyz_trans[mask] 
         
-        # x: 所有点的额外特征，形状 [B*N, input_dim-3]
+        p = valid_xyz[:, :3].contiguous()
+        
         if self.input_dim > 3:
-            x = xyz_trans[..., 3:].contiguous().view(B * N, self.input_dim - 3)
+            x = valid_xyz[:, 3:].contiguous()
         else:
             x = None
             
-        # o: Offset 张量，极速生成法 (并确保其连续)
-        o = (torch.arange(1, B + 1, dtype=torch.int32, device=device) * N).contiguous()
+        # 💡 重新构造真实的 Offset (o)
+        # 统计每个 batch 里的有效点数量，并累加求和
+        valid_counts = mask.sum(dim=1, dtype=torch.int32)
+        o = torch.cumsum(valid_counts, dim=0).int().contiguous()
         
-        # 3. 送入开源 SOTA 模型进行前向计算
-        out = self.backbone([p, x, o])  # 输出维度: [B*N, num_classes]
+        # ==========================================
+        # 送入骨干网络 (此时网络运算效率达 100%，没有任何废计算)
+        # ==========================================
+        out_valid = self.backbone([p, x, o])  # [N_total_valid, num_classes]
         
-        # 4. 重新拉伸回你的预测框架所需的维度
-        out = out.view(B, N, -1)  # 输出维度: [B, N, num_classes]
+        # ==========================================
+        # 💡 还原回规整的张量 (为 Loss 计算做准备)
+        # ==========================================
+        # 初始化一个全为极小值 (-1e4) 的张量
+        # 为什么用极小值？因为经过 Sigmoid(-1e4) 后，Padding 点的预测概率会严格变为 0.0！
+        out = torch.full((B, N, out_valid.shape[-1]), -1e4, device=device, dtype=out_valid.dtype)
+        
+        # 利用布尔索引，把算好的真实点精准塞回原本的位置
+        out[mask] = out_valid 
         
         return out
 
@@ -493,21 +508,29 @@ class get_model(nn.Module):
 #  Part 3: 你的专属 Loss 模块 (完全保持原样)
 # ==========================================
 
-def focal_loss(logits, targets, weights=None, alpha=0.9, gamma=2.0):
+def focal_loss(logits, targets, weights=None, alpha=0.9, gamma=2.0, mask=None):
     logits = logits.squeeze(-1) if logits.dim() > 2 else logits
     targets = targets.squeeze(-1).float() if targets.dim() > 2 else targets
     probs = torch.sigmoid(logits)
+    
     p_t = targets * probs + (1 - targets) * (1 - probs)
     modulating_factor = (1 - p_t) ** gamma
     if alpha >= 0:
         alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
     else:
         alpha_t = 1.0
+        
     bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
     loss = alpha_t * modulating_factor * bce_loss
+    
     if weights is not None:
         weights = weights.squeeze(-1) if weights.dim() > loss.dim() else weights
         loss = loss * weights
+        
+    # 💡 核心过滤：只对 mask 为 True 的有效点计算均值
+    if mask is not None:
+        loss = loss[mask]
+        
     return loss.mean()
 
 
@@ -836,7 +859,7 @@ class get_loss(nn.Module):
         self.M_pair_max = M_pair_max; self.r_local = r_local; self.alpha1 = alpha1
         self.M_safe_max = M_safe_max; self.delta_c = delta_c; self.r_connect = r_connect
 
-    def forward(self, logits, targets, points):
+    def forward(self, logits, targets, points, mask=None):
         if isinstance(logits, (tuple, list)): logits = logits[0]
         
         if points.shape[1] >= 5: 
@@ -852,8 +875,6 @@ class get_loss(nn.Module):
         if p.dim() == 3: p = p.squeeze(-1)
         
         loss = 0.0
-        
-        # 💡 新增：指标记录字典
         metrics = {
             "loss_straight": 0.0,
             "loss_cost": 0.0,
@@ -861,8 +882,9 @@ class get_loss(nn.Module):
             "phi_c": 0.0
         }
         
-        loss += self.w_bce * focal_loss(logits, targets, weights=None, alpha=self.alpha, gamma=self.gamma)
-        
+        # 💡 3. 将 mask 传给 focal_loss
+        loss += self.w_bce * focal_loss(logits, targets, weights=None, alpha=self.alpha, gamma=self.gamma, mask=mask)
+
         if self.w_straight > 0:
             l_str, p_s = straightness_loss(
                 p=p, xyz=xyz_phys, f_start=f_start, f_goal=f_goal, 

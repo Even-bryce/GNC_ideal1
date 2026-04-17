@@ -18,20 +18,20 @@ SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\checkpoints"
 
 # 2. 真实的训练数据路径
 # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
-# DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
-DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
+DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data9"
+# DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
 
 START_EPOCH = 1  # 如果从头训练填 1；如果调参直接从第 41 轮开始，填 41
 PRETRAINED_CKPT = r"C:\Users\Administrator\Desktop\experiments\checkpoints\ckpt_epoch_40.pth" # 填入你第40轮保存的权重路径
 
 GAMMA = 2
 ALPHA = 0.6
-TOTAL_EPOCHS = 40         
+TOTAL_EPOCHS = 70        
 # ---------------------      
 # ---------------------
 
 def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
-    # --- Warm-up 策略 ---
+    # --- Warm-up 策略保持原样 ---
     warmup_epochs = 40
     if epoch_idx <= warmup_epochs:
         criterion.w_bce = 20
@@ -46,8 +46,8 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
         criterion.w_safety = 0.1
         criterion.delta_s = 0.8
         criterion.delta_d = 0.2
-        criterion.tau_s = 0.5  # 越小越加深点云，不然和focal loss冲突导致总loss上升，理论上应该让惩罚比较少因为要惩罚的冗余点云本身也不应该很多
-        criterion.tau_c = 0.3  # 可以根据成本轻微惩罚低质量点云
+        criterion.tau_s = 0.5  
+        criterion.tau_c = 0.3  
         phase_name = "Refinement"
 
     model.train()
@@ -57,45 +57,55 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
     max_probs, neg_max_probs, neg_fpr_list = [], [], []
     se_mean_probs, mid_mean_probs, mid_fnr_list = [], [], []
     
-    # 💡 新增：用于存放一个 epoch 内的辅助变量
     ep_l_str, ep_l_cost = [], []
     ep_phi_s, ep_phi_c = [], []
 
-    for batch_idx, (points, targets, gt_waypoints_list) in enumerate(loader):
+    # ==========================================
+    # 💡 修改点 1：解包接收 mask
+    # ==========================================
+    for batch_idx, (points, targets, mask, gt_waypoints_list) in enumerate(loader):
         points = points.to(device)
         targets = targets.to(device)
+        mask = mask.to(device) # 💡 将 mask 也放入 GPU
 
-        if points.shape[-1] >= 6:
+        if points.shape[-1] >= 5:
             points = points.permute(0, 2, 1) 
         
         xyz = points[:, :3, :].permute(0, 2, 1).contiguous()
 
         optimizer.zero_grad()
-        output = model(points) 
+        
+        # ==========================================
+        # 💡 修改点 2：把 mask 传给模型和 Loss
+        # ==========================================
+        output = model(points, mask=mask) 
         logits = output[0] if isinstance(output, (tuple, list)) else output
 
-        # 💡 解包：接收总 loss 和 监控字典
-        loss, metrics = criterion(logits, targets, points)
+        loss, metrics = criterion(logits, targets, points, mask=mask)
         
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
         
-        # 💡 记录到列表
         ep_l_str.append(metrics["loss_straight"])
         ep_l_cost.append(metrics["loss_cost"])
         ep_phi_s.append(metrics["phi_s"])
         ep_phi_c.append(metrics["phi_c"])
 
-        # --- 后面的 Monitoring Logic 保持不变 ---
+        # ==========================================
+        # 💡 修改点 3：统计指标时，使用 mask 过滤假点
+        # ==========================================
         with torch.no_grad():
             probs = torch.sigmoid(logits)
             if probs.dim() == 3: probs = probs.squeeze(-1)   # [B, N]
             if targets.dim() == 3: targets = targets.squeeze(-1) # [B, N]
 
-            max_probs.append(probs.max().item())
+            # 提取全图最大概率（仅限有效点）
+            if mask.sum() > 0:
+                max_probs.append(probs[mask].max().item())
             
-            neg_mask = (targets < 0.1) 
+            # 💡 负样本指标计算 (增加 & mask)
+            neg_mask = (targets < 0.1) & mask 
             if neg_mask.sum() > 0:
                 neg_probs = probs[neg_mask]
                 neg_max_probs.append(neg_probs.max().item())
@@ -103,11 +113,13 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
                 fpr = num_false_pos / neg_probs.numel()
                 neg_fpr_list.append(fpr.item())
 
-            pos_mask = (targets > 0.8)
-            if points.shape[1] >= 6:  
+            # 💡 正样本指标计算 (增加 & mask)
+            pos_mask = (targets > 0.8) & mask
+            if points.shape[1] >= 5:  
                 f_start = points[:, 3, :]  
                 f_goal  = points[:, 4, :]
                 is_start_end = (f_start > 0.95) | (f_goal > 0.95)
+                
                 mask_SE = pos_mask & is_start_end       
                 mask_MID = pos_mask & (~is_start_end)   
 
@@ -120,20 +132,18 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
                     fnr = num_false_neg / mid_probs.numel()
                     mid_fnr_list.append(fnr.item())
 
-    # --- 计算均值 ---
+    # --- 后面的均值计算和 Print 保持原样 ---
     avg_neg_max = np.mean(neg_max_probs) if len(neg_max_probs) > 0 else 0.0
     avg_fpr = np.mean(neg_fpr_list) if len(neg_fpr_list) > 0 else 0.0
     avg_se_mean = np.mean(se_mean_probs) if len(se_mean_probs) > 0 else 0.0
     avg_mid_mean = np.mean(mid_mean_probs) if len(mid_mean_probs) > 0 else 0.0
     avg_mid_fnr = np.mean(mid_fnr_list) if len(mid_fnr_list) > 0 else 0.0  
     
-    # 💡 提取最新的监控指标均值
     avg_l_str = np.mean(ep_l_str) if len(ep_l_str) > 0 else 0.0
     avg_l_cost = np.mean(ep_l_cost) if len(ep_l_cost) > 0 else 0.0
     avg_phi_s = np.mean(ep_phi_s) if len(ep_phi_s) > 0 else 0.0
     avg_phi_c = np.mean(ep_phi_c) if len(ep_phi_c) > 0 else 0.0
 
-    # 💡 输出极度丰富的诊断面板
     print(f"[Debug Ep{epoch_idx}] {phase_name} |\n"
           f"  > Probs: SE:{avg_se_mean:.3f} | Mid:{avg_mid_mean:.3f} | NegMax:{avg_neg_max:.3f} | FPR:{avg_fpr:.4f} | FNR:{avg_mid_fnr:.4f}\n"
           f"  > Graph: Phi_s:{avg_phi_s:.3f} | Phi_c:{avg_phi_c:.3f} | L_str:{avg_l_str:.4f} | L_cost:{avg_l_cost:.4f}") 
@@ -173,20 +183,23 @@ def validate(model, loader, criterion, device):
     model.eval()
     total_loss = 0.0
 
-    for points, targets, gt_waypoints_list in loader:
+    # 💡 1. 接收 mask
+    for points, targets, mask, gt_waypoints_list in loader:
         points = points.to(device)
         targets = targets.to(device)
+        mask = mask.to(device) # 💡 将 mask 放入 GPU
         
-        if points.shape[-1] >= 6:
+        if points.shape[-1] >= 5:
             points = points.permute(0, 2, 1)
             
         xyz = points[:, :3, :].permute(0, 2, 1).contiguous()
 
-        output = model(points)
+        # 💡 2. 传入 mask 给模型
+        output = model(points, mask=mask)
         logits = output[0] if isinstance(output, (tuple, list)) else output
 
-        # 💡 解包，忽略 metrics
-        loss, _ = criterion(logits, targets, points)
+        # 💡 3. 传入 mask 给 criterion
+        loss, _ = criterion(logits, targets, points, mask=mask)
         total_loss += loss.item()
 
     return total_loss / len(loader)
@@ -232,7 +245,7 @@ def main():
     val_loader   = build_dataloader(val_files, batch_size=32, shuffle=False)
 
     # --- 【最简单的动态探针】 ---
-    sample_points, _, curr_gt_waypoints = next(iter(train_loader))
+    sample_points, _, _, curr_gt_waypoints = next(iter(train_loader))
     real_input_dim = sample_points.shape[-1]
     print(f"[*] 动态检测到数据特征维度为: {real_input_dim}")
 

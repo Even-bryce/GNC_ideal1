@@ -299,25 +299,25 @@ if __name__ == "__main__":
             seed=42
         )
 
-    # env_map = env_generator_maze(
-    #     grid_size=(4, 4),           # 4x4的网格，网格越多通道越窄越复杂
-    #     map_dim=(1500, 1500, 240),
-    #     r_crash_range=(40, 60),     # 为了给通道留出足够空间，半径相较于你原来设定的(80,125)稍微缩小了一些
-    #     r_risk_range=(10, 20),
-    #     zmax_range=(240, 240),
-    #     seed=42
-    # )
+    env_map = env_generator_maze(
+        grid_size=(4, 4),           # 4x4的网格，网格越多通道越窄越复杂
+        map_dim=(1500, 1500, 240),
+        r_crash_range=(40, 60),     # 为了给通道留出足够空间，半径相较于你原来设定的(80,125)稍微缩小了一些
+        r_risk_range=(10, 20),
+        zmax_range=(240, 240),
+        seed=42
+    )
 
-#     env_map = env_generator_cluster(
-#     map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
-#     num_clusters=20,             # 建议 10~15 之间，保证有足够空间
-#     chain_length_range=(1, 4),   # 每个簇的圆柱体数量
-#     r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
-#     r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
-#     r_risk_range=(10, 20),       # 风险半径偏移量
-#     zmax_range=(240, 240),
-#     min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
-#     seed=None,
-# )
+    env_map = env_generator_cluster(
+    map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
+    num_clusters=20,             # 建议 10~15 之间，保证有足够空间
+    chain_length_range=(1, 4),   # 每个簇的圆柱体数量
+    r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
+    r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
+    r_risk_range=(10, 20),       # 风险半径偏移量
+    zmax_range=(240, 240),
+    min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
+    seed=None,
+)
 
     plot_map(env_map)
