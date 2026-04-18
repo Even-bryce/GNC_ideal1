@@ -260,7 +260,6 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
         return
 
     dataset = PathPointDataset(all_files)
-    # dataset[0] 返回的是单条数据，没有经过 collate_fn，所以还是 3 个变量，这里不用改
     sample_points, sample_labels, sample_waypoints = dataset[0]
     real_input_dim = sample_points.shape[1]
 
@@ -276,7 +275,7 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
     test_loader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
     # ==========================================
-    # 💡 物理距离评估累加器
+    # 物理距离评估累加器
     # ==========================================
     total_true_dist = 0.0
     total_gt_dist = 0.0
@@ -284,7 +283,7 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
     evaluated_samples = 0
 
     # ==========================================
-    # 💡 分类概率评估累加器
+    # 分类概率评估累加器 (专门针对航路点头)
     # ==========================================
     val_max_probs, val_neg_max_probs, val_neg_fpr_list = [], [], []
     val_se_mean_probs, val_mid_mean_probs, val_mid_fnr_list = [], [], []
@@ -292,39 +291,42 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
     print(f"🚀 开始批量评估，共计 {len(val_files)} 个样本，请稍候...")
 
     with torch.no_grad():
-        # 💡 修改 1：解包时接收 mask
         for i, (points, targets, mask, gt_waypoints_list) in enumerate(test_loader):
             points = points.to(device)   
-            targets = targets.to(device) 
-            mask = mask.to(device) # 💡 将 mask 放入 GPU
+            targets = targets.to(device) # [B, N, 2]
+            mask = mask.to(device)       # [B, N]
             
             points_trans = points.permute(0, 2, 1).contiguous() 
 
-            # 💡 修改 2：把 mask 传给模型
             output = model(points_trans, mask=mask)
             logits = output[0] if isinstance(output, (tuple, list)) else output
-            probs = torch.sigmoid(logits) 
+            probs = torch.sigmoid(logits) # [B, N, 2]
 
             # ==========================================
-            # 💡 修改 3：统计分类指标时，全部加上 `& mask` 过滤假点
+            # 💡 1. 拆分双头概率与真值
             # ==========================================
-            probs_sq = probs.squeeze(-1) if probs.dim() == 3 else probs       # [B, N]
-            targets_sq = targets.squeeze(-1) if targets.dim() == 3 else targets # [B, N]
+            probs_tube = probs[..., 0]      # [B, N]
+            probs_wp = probs[..., 1]        # [B, N]
+            targets_tube = targets[..., 0]  # [B, N]
+            targets_wp = targets[..., 1]    # [B, N]
 
+            # ==========================================
+            # 💡 2. 统计航路点分类指标 (使用 probs_wp 和 targets_wp)
+            # ==========================================
             if mask.sum() > 0:
-                val_max_probs.append(probs_sq[mask].max().item())
+                val_max_probs.append(probs_wp[mask].max().item())
             
             # --- 统计误检 (FPR) ---
-            neg_mask = (targets_sq < 0.1) & mask # 💡 加上 mask
+            neg_mask = (targets_wp < 0.1) & mask 
             if neg_mask.sum() > 0:
-                neg_probs = probs_sq[neg_mask]
+                neg_probs = probs_wp[neg_mask]
                 val_neg_max_probs.append(neg_probs.max().item())
                 num_false_pos = (neg_probs > 0.5).float().sum()
                 fpr = num_false_pos / neg_probs.numel()
                 val_neg_fpr_list.append(fpr.item())
 
             # --- 统计漏检 (FNR) 及 SE/MID 概率 ---
-            pos_mask = (targets_sq > 0.8) & mask # 💡 加上 mask
+            pos_mask = (targets_wp > 0.8) & mask 
             if points_trans.shape[1] >= 6:  
                 f_start = points_trans[:, 3, :]  
                 f_goal  = points_trans[:, 4, :]
@@ -333,39 +335,37 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
                 mask_MID = pos_mask & (~is_start_end)   
 
                 if mask_SE.sum() > 0:
-                    val_se_mean_probs.append(probs_sq[mask_SE].mean().item())
+                    val_se_mean_probs.append(probs_wp[mask_SE].mean().item())
                 if mask_MID.sum() > 0:
-                    mid_probs = probs_sq[mask_MID]
+                    mid_probs = probs_wp[mask_MID]
                     val_mid_mean_probs.append(mid_probs.mean().item())
+                    # ⚠️ 注意：这里评估时还是用 0.5 来看漏报
                     num_false_neg = (mid_probs < 0.5).float().sum()
                     fnr = num_false_neg / mid_probs.numel()
                     val_mid_fnr_list.append(fnr.item())
 
             # ==========================================
-            # 💡 修改 4：可视化与聚类前，彻底剔除 Padding 数据
+            # 💡 3. 彻底剔除 Padding 数据
             # ==========================================
-            # 获取当前 batch 的第 0 个样本 (因为 test_loader batch_size=1)
             xyz_vis_raw = points[0, :, :3]      
-            target_vis_raw = targets[0, :, 0] if targets.dim() == 3 else targets[0, :]
-            prob_vis_raw = probs[0, :, 0] if probs.dim() == 3 else probs[0, :]
+            target_wp_raw = targets_wp[0, :]
+            prob_tube_raw = probs_tube[0, :]
+            prob_wp_raw = probs_wp[0, :]
             mask_vis = mask[0, :] 
 
-            # 💡 核心：只保留有效点 (True) 的数据，彻底切断 (0,0,0) 的干扰
             xyz_vis = xyz_vis_raw[mask_vis]
-            target_vis = target_vis_raw[mask_vis]
-            prob_vis = prob_vis_raw[mask_vis]
+            target_wp_vis = target_wp_raw[mask_vis]
+            prob_tube_vis = prob_tube_raw[mask_vis]
+            prob_wp_vis = prob_wp_raw[mask_vis]
 
-            # 经过过滤后，前两个有效点肯定是起点和终点
             start_pt = xyz_vis[0].cpu().numpy()
             goal_pt = xyz_vis[1].cpu().numpy()
 
             mid_xyz = xyz_vis[2:]
-            mid_target = target_vis[2:]
-            mid_prob = prob_vis[2:]
+            mid_target_wp = target_wp_vis[2:]
+            mid_prob_tube = prob_tube_vis[2:]
+            mid_prob_wp = prob_wp_vis[2:]
 
-            # ==========================================
-            # 后面原有的逻辑保持不变
-            # ==========================================
             raw_wps_phys = gt_waypoints_list[0]
             if isinstance(raw_wps_phys, torch.Tensor):
                 raw_wps_phys = raw_wps_phys.cpu().numpy()
@@ -380,9 +380,15 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
             else:
                 true_mid_wps = np.empty((0, 3))
 
-            pred_mask_vis = mid_prob > 0.8
+            # ==========================================
+            # 💡 4. 终极大招：联合推理预测提取 (Joint Inference)
+            # ==========================================
+            # 既要在管道安全区内 (tube > 0.5)，又要满足航路点置信度极高 (wp > 0.8)
+            # pred_mask_vis = (mid_prob_tube > 0.5) & (mid_prob_wp > 0.8)
+            pred_mask_vis = mid_prob_tube > 0.5
+            
             pred_xyz_filtered = mid_xyz[pred_mask_vis].cpu().numpy()
-            pred_scores_filtered = mid_prob[pred_mask_vis].cpu().numpy()
+            pred_scores_filtered = mid_prob_wp[pred_mask_vis].cpu().numpy()
             
             raw_pred_mid_waypoints = extract_waypoints(
                 pred_xyz_filtered, pred_scores_filtered, 
@@ -396,18 +402,21 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
                 max_turn_angle=60.0  
             )
             
-            gt_mask_vis = mid_target > 0.8
+            gt_mask_vis = mid_target_wp > 0.8
             gt_xyz_filtered = mid_xyz[gt_mask_vis].cpu().numpy()
-            gt_scores_filtered = mid_target[gt_mask_vis].cpu().numpy()
+            gt_scores_filtered = mid_target_wp[gt_mask_vis].cpu().numpy()
             
             gt_mid_waypoints = extract_waypoints(
                 gt_xyz_filtered, gt_scores_filtered, 
                 map_dim=map_dim, eps=cluster_eps, peak_radius=peak_radius
             )
 
+            # ==========================================
+            # 可视化与测距计算保持不变
+            # ==========================================
             if 0 <= i <= 10:
                 visualize_result(
-                    xyz_vis, target_vis, prob_vis, 
+                    xyz_vis, target_wp_vis, prob_wp_vis,  # 这里传入 WP 通道给可视化函数画点
                     start_pt, goal_pt, gt_mid_waypoints, pred_mid_waypoints, true_mid_wps,
                     threshold=0.5
                 )
@@ -579,10 +588,10 @@ def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
 if __name__ == "__main__":
     
     # DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data9"
-    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
+    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data10"
     # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
-    # CKPT_PATH = r"C:\Users\Administrator\Desktop\experiments\checkpoints\best_model.pth"
-    CKPT_PATH = r"C:\Users\Administrator\Desktop\experiments\best_model_for_trian_data5\best_model.pth"
+    CKPT_PATH = r"C:\Users\Administrator\Desktop\experiments\checkpoints\best_model.pth"
+    # CKPT_PATH = r"C:\Users\Administrator\Desktop\experiments\best_model_for_trian_data5\best_model.pth"
 
 
 

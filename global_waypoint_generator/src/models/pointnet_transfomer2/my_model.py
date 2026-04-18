@@ -356,41 +356,47 @@ class PointTransformerSeg(nn.Module):
     def __init__(self, block, blocks, c=6, k=13, dropout_p=0):
         super().__init__()
         self.c = c
+        self.k = k # 保留属性，防止外部脚本通过 model.k 读取时报错
+        
         self.in_planes, planes = c, [32, 64, 128, 256, 512]
         share_planes = 8
         stride, nsample = [1, 4, 4, 4, 4], [8, 16, 16, 16, 16]
-        self.enc1 = self._make_enc(block, planes[0], blocks[0], share_planes, stride=stride[0], nsample=nsample[0])  # N/1
-        self.enc2 = self._make_enc(block, planes[1], blocks[1], share_planes, stride=stride[1], nsample=nsample[1])  # N/4
-        self.enc3 = self._make_enc(block, planes[2], blocks[2], share_planes, stride=stride[2], nsample=nsample[2])  # N/16
-        self.enc4 = self._make_enc(block, planes[3], blocks[3], share_planes, stride=stride[3], nsample=nsample[3])  # N/64
-        self.enc5 = self._make_enc(block, planes[4], blocks[4], share_planes, stride=stride[4], nsample=nsample[4])  # N/256
-        self.dec5 = self._make_dec(block, planes[4], 2, share_planes, nsample=nsample[4], is_head=True)  # transform p5
-        self.dec4 = self._make_dec(block, planes[3], 2, share_planes, nsample=nsample[3])  # fusion p5 and p4
-        self.dec3 = self._make_dec(block, planes[2], 2, share_planes, nsample=nsample[2])  # fusion p4 and p3
-        self.dec2 = self._make_dec(block, planes[1], 2, share_planes, nsample=nsample[1])  # fusion p3 and p2
-        self.dec1 = self._make_dec(block, planes[0], 2, share_planes, nsample=nsample[0])  # fusion p2 and p1
-        self.cls = nn.Sequential(nn.Linear(planes[0], planes[0]), nn.BatchNorm1d(planes[0]), nn.ReLU(inplace=True), nn.Dropout(p=dropout_p), nn.Linear(planes[0], k))
-        # # 💡 替换为高容量门控双分支头 (Dual-Branch Gated Head)
-        # self.head_base = nn.Sequential(
-        #     nn.Linear(planes[0], planes[0]), 
-        #     nn.BatchNorm1d(planes[0]), 
-        #     nn.ReLU(inplace=True), 
-        #     nn.Dropout(p=dropout_p)
-        # )
         
-        # # 专家 1：主攻召回 (迎合 Focal Loss，找点)
-        # self.expert_recall = nn.Linear(planes[0], k)
+        # --- Encoder (提取多尺度特征) ---
+        self.enc1 = self._make_enc(block, planes[0], blocks[0], share_planes, stride=stride[0], nsample=nsample[0])
+        self.enc2 = self._make_enc(block, planes[1], blocks[1], share_planes, stride=stride[1], nsample=nsample[1])
+        self.enc3 = self._make_enc(block, planes[2], blocks[2], share_planes, stride=stride[2], nsample=nsample[2])
+        self.enc4 = self._make_enc(block, planes[3], blocks[3], share_planes, stride=stride[3], nsample=nsample[3])
+        self.enc5 = self._make_enc(block, planes[4], blocks[4], share_planes, stride=stride[4], nsample=nsample[4])
         
-        # # 专家 2：主攻精简 (迎合几何 Loss，剔除冗余)
-        # self.expert_refine = nn.Linear(planes[0], k)
+        # --- Decoder (上采样融合) ---
+        self.dec5 = self._make_dec(block, planes[4], 2, share_planes, nsample=nsample[4], is_head=True)
+        self.dec4 = self._make_dec(block, planes[3], 2, share_planes, nsample=nsample[3])
+        self.dec3 = self._make_dec(block, planes[2], 2, share_planes, nsample=nsample[2])
+        self.dec2 = self._make_dec(block, planes[1], 2, share_planes, nsample=nsample[1])
+        self.dec1 = self._make_dec(block, planes[0], 2, share_planes, nsample=nsample[0])
         
-        # # 门控网络 (根据特征决定听哪个专家的)
-        # self.gate = nn.Sequential(
-        #     nn.Linear(planes[0], planes[0] // 2),
-        #     nn.ReLU(inplace=True),
-        #     nn.Linear(planes[0] // 2, 2),
-        #     nn.Softmax(dim=-1) # 输出两个专家的权重，和为 1
-        # )
+        # ==========================================
+        # 💡 解耦的双头网络 (Dual-Head Architecture)
+        # ==========================================
+        # 即使外面传入了 k=13 或 k=2，我们依然在底层把每个头焊死输出 1 维分数
+        # 这样既保住了外部面子，又保住了内部双通道的里子
+        
+        self.head_tube = nn.Sequential(
+            nn.Linear(planes[0], planes[0]), 
+            nn.BatchNorm1d(planes[0]), 
+            nn.ReLU(inplace=True), 
+            nn.Dropout(p=dropout_p), 
+            nn.Linear(planes[0], self.k)
+        )
+        
+        self.head_waypoint = nn.Sequential(
+            nn.Linear(planes[0], planes[0]), 
+            nn.BatchNorm1d(planes[0]), 
+            nn.ReLU(inplace=True), 
+            nn.Dropout(p=dropout_p), 
+            nn.Linear(planes[0], self.k)
+        )
 
     def _make_enc(self, block, planes, blocks, share_planes=8, stride=1, nsample=16):
         layers = []
@@ -410,38 +416,44 @@ class PointTransformerSeg(nn.Module):
 
     def forward(self, pxo):
         p0, x0, o0 = pxo  # (n, 3), (n, c), (b)
+        
         # 如果 self.c > 3，说明除了坐标还有额外特征，将其拼接
         x0 = p0 if self.c == 3 else torch.cat((p0, x0), 1)
+        
+        # Encoder 向下提取
         p1, x1, o1 = self.enc1([p0, x0, o0])
         p2, x2, o2 = self.enc2([p1, x1, o1])
         p3, x3, o3 = self.enc3([p2, x2, o2])
         p4, x4, o4 = self.enc4([p3, x3, o3])
         p5, x5, o5 = self.enc5([p4, x4, o4])
+        
+        # Decoder 向上融合
         x5 = self.dec5[1:]([p5, self.dec5[0]([p5, x5, o5]), o5])[1]
         x4 = self.dec4[1:]([p4, self.dec4[0]([p4, x4, o4], [p5, x5, o5]), o4])[1]
         x3 = self.dec3[1:]([p3, self.dec3[0]([p3, x3, o3], [p4, x4, o4]), o3])[1]
         x2 = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3, o3]), o2])[1]
         x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2, o2]), o1])[1]
-        x = self.cls(x1)
-        # # 💡 新的输出逻辑
-        # feat = self.head_base(x1)
         
-        # out_recall = self.expert_recall(feat)
-        # out_refine = self.expert_refine(feat)
+        # ==========================================
+        # 💡 核心修改：分流输出 (Branching)
+        # ==========================================
+        # x1 的形状是 [N, planes[0]]，这是共享的最精细底层特征
         
-        # # 计算门控权重
-        # gating_weights = self.gate(feat) # [N, 2]
+        out_tube = self.head_tube(x1)         # 输出形状: [N, 1]
+        out_waypoint = self.head_waypoint(x1) # 输出形状: [N, 1]
         
-        # # 动态融合：w1 * expert1 + w2 * expert2
-        # x = gating_weights[:, 0:1] * out_recall + gating_weights[:, 1:2] * out_refine
-        return x
+        # 沿着特征维度拼接，最终输出形状变为 [N, 2]
+        # 通道 0: Tube, 通道 1: Waypoint
+        x_out = torch.cat([out_tube, out_waypoint], dim=-1) 
+        
+        return x_out
 
 # ==========================================
 #  Part 2: 桥接 Wrapper (无缝替换旧模型)
 # ==========================================
 
 class get_model(nn.Module):
-    def __init__(self, num_classes, input_dim=8, dropout_p=0):
+    def __init__(self, num_classes=1, input_dim=8, dropout_p=0):
         super(get_model, self).__init__()
         self.input_dim = input_dim
         self.backbone = PointTransformerSeg(
@@ -452,7 +464,6 @@ class get_model(nn.Module):
             dropout_p=dropout_p
         )
 
-    # 💡 1. 接收 DataLoader 传来的 mask
     def forward(self, xyz, mask=None):
         """
         xyz: [B, input_dim, N] 
@@ -464,41 +475,25 @@ class get_model(nn.Module):
         xyz_trans = xyz.permute(0, 2, 1).contiguous()
         
         if mask is None:
-            # 兼容旧代码，如果没有传mask，假定全是有效点
             mask = torch.ones((B, N), dtype=torch.bool, device=device)
 
-        # ==========================================
-        # 💡 核心魔法：数据浓缩 (剥离 Padding)
-        # ==========================================
-        # 直接利用 mask 提取所有真实点，打破 Batch 边界
-        # valid_xyz 形状变为 [N_total_valid, C_in] (全 Batch 所有真实点的总和)
+        # 数据浓缩 (剥离 Padding)
         valid_xyz = xyz_trans[mask] 
         
         p = valid_xyz[:, :3].contiguous()
-        
-        if self.input_dim > 3:
-            x = valid_xyz[:, 3:].contiguous()
-        else:
-            x = None
+        x = valid_xyz[:, 3:].contiguous() if self.input_dim > 3 else None
             
-        # 💡 重新构造真实的 Offset (o)
-        # 统计每个 batch 里的有效点数量，并累加求和
+        # 重新构造真实的 Offset (o)
         valid_counts = mask.sum(dim=1, dtype=torch.int32)
         o = torch.cumsum(valid_counts, dim=0).int().contiguous()
         
-        # ==========================================
-        # 送入骨干网络 (此时网络运算效率达 100%，没有任何废计算)
-        # ==========================================
-        out_valid = self.backbone([p, x, o])  # [N_total_valid, num_classes]
+        # 送入骨干网络，输出形状为 [N_total_valid, 2]
+        out_valid = self.backbone([p, x, o])  
         
-        # ==========================================
-        # 💡 还原回规整的张量 (为 Loss 计算做准备)
-        # ==========================================
-        # 初始化一个全为极小值 (-1e4) 的张量
-        # 为什么用极小值？因为经过 Sigmoid(-1e4) 后，Padding 点的预测概率会严格变为 0.0！
-        out = torch.full((B, N, out_valid.shape[-1]), -1e4, device=device, dtype=out_valid.dtype)
-        
-        # 利用布尔索引，把算好的真实点精准塞回原本的位置
+        # 💡 还原回规整的张量
+        # 使用 -15.0 代替 -1e4。因为 Sigmoid(-15.0) 约为 3e-7，
+        # 既能保证预测概率严格为 0，又能防止在半精度/某些 Loss 计算中出现 NaN
+        out = torch.full((B, N, out_valid.shape[-1]), -15.0, device=device, dtype=out_valid.dtype)
         out[mask] = out_valid 
         
         return out
@@ -825,10 +820,6 @@ def cost_loss(p, xyz, f_start, f_goal, delta_s=0.5, R_nms=0.5, K_local=3, delta_
     return final_loss, final_phi
 
 class get_loss(nn.Module):
-    # 💡 修改 1: 移除了不再需要的 d_max=10.0
-    # 💡 修改 2: 新增了 K_pairs=3
-    # 💡 修改 3: 建议将 alpha3 默认值改为 1.0 (配合映射到 [e^-1, 1])
-    # 💡 修改 4: 建议将 tau_c 默认值改为 0.6 (与 tau_s 保持合理的及格线)
     def __init__(self, w_bce=1.0, w_straight=1.0, w_safety=0.2, w_conn=0.0, 
                  w_cost=1.0, alpha=0.6, gamma=2.0, delta_s=0.5, delta_d=0.2, 
                  R_nms=0.5, K_local=3, K_pairs=3, r_corridor=0.03, rho=20000.0, 
@@ -871,23 +862,84 @@ class get_loss(nn.Module):
         f_start = points_trans[..., 3]
         f_goal = points_trans[..., 4]
         
-        p = torch.sigmoid(logits)
-        if p.dim() == 3: p = p.squeeze(-1)
+        # ==========================================
+        # 💡 1. 解析双通道，过滤 DataLoader 带来的 Padding
+        # ==========================================
+        if mask is not None:
+            valid_logits = logits[mask]
+            valid_targets = targets[mask]
+        else:
+            valid_logits = logits.view(-1, 2)
+            valid_targets = targets.view(-1, 2)
+            
+        # 拆分出两个独立的流
+        logits_tube = valid_logits[:, 0]
+        logits_wp = valid_logits[:, 1]
+        target_tube = valid_targets[:, 0]
+        target_wp = valid_targets[:, 1]
         
         loss = 0.0
-        metrics = {
-            "loss_straight": 0.0,
-            "loss_cost": 0.0,
-            "phi_s": 0.0,
-            "phi_c": 0.0
-        }
+        metrics = {"loss_tube": 0.0, "loss_wp": 0.0, "loss_straight": 0.0, "loss_cost": 0.0, "phi_s": 0.0, "phi_c": 0.0}
         
-        # 💡 3. 将 mask 传给 focal_loss
-        loss += self.w_bce * focal_loss(logits, targets, weights=None, alpha=self.alpha, gamma=self.gamma, mask=mask)
+        # ==========================================
+        # 💡 2. 核心：双头联合监督与层级 Focal Loss
+        # ==========================================
+        
+        # ------------------------------------------
+        # 通道 0：管道 (铺路) -> 全局 Focal Loss
+        # ------------------------------------------
+        # 目的：对抗全图级别的正负样本不均 (10%管道 vs 90%墙壁)
+        # 注意：这里不传入 mask，让 Focal Loss 压制全图的简单负样本
+        loss_tube = focal_loss(
+            logits=logits_tube, 
+            targets=target_tube, 
+            weights=None,
+            alpha=self.alpha, 
+            gamma=self.gamma
+        )
+        
+        # ------------------------------------------
+        # 通道 1：航路点 (找点) -> 空间截断 + 局部 Focal Loss
+        # ------------------------------------------
+        # 目的：对抗管道内部的局部正负样本不均 (极少数拐点 vs 大量直路)
+        # 生成空间截断掩码：只关注管道真值 > 0.5 的点
+        spatial_mask = target_tube > 0.5 
+        
+        if spatial_mask.sum() > 0:
+            loss_wp = focal_loss(
+                logits=logits_wp, 
+                targets=target_wp, 
+                weights=None, 
+                alpha=self.alpha, 
+                gamma=self.gamma, 
+                mask=spatial_mask  # 💡 只有管道内的点参与计算
+            )
+        else:
+            loss_wp = torch.tensor(0.0, device=logits.device, requires_grad=True)
+            
+        # 汇总基础监督 Loss (航路点任务更难，通常赋予更高的权重，比如 2.0 倍)
+        loss_supervised = loss_tube + 0 * loss_wp
+        loss += self.w_bce * loss_supervised
+
+        
+        metrics["loss_tube"] = loss_tube.item()
+        metrics["loss_wp"] = loss_wp.item()
+
+        # ==========================================
+        # 💡 3. 物理约束 Loss (基于航路点预测结果)
+        # ==========================================
+        # 这里提取第 1 通道（航路点）的概率来喂给后续的物理公式
+        # 提取概率
+        p_tube = torch.sigmoid(logits[..., 0])
+        p_wp = torch.sigmoid(logits[..., 1])
+
+        # 💡 神级操作：把 p_tube 的梯度切断！
+        # 让它在计算物理 Loss 时变成一个“只读”的常量
+        p_joint = p_tube.detach() * p_wp
 
         if self.w_straight > 0:
             l_str, p_s = straightness_loss(
-                p=p, xyz=xyz_phys, f_start=f_start, f_goal=f_goal, 
+                p=p_joint, xyz=xyz_phys, f_start=f_start, f_goal=f_goal, 
                 delta_s=self.delta_s, R_nms=self.R_nms, K_local=self.K_local, 
                 delta_d=self.delta_d, K_pairs=self.K_pairs, 
                 r_corridor=self.r_corridor, rho=self.rho, 
@@ -900,18 +952,18 @@ class get_loss(nn.Module):
             
         if self.w_safety > 0:
             loss += self.w_safety * safety_loss(
-                p=p, xyz=xyz_phys, delta_s=self.delta_s, r_local=self.r_local, 
+                p=p_joint, xyz=xyz_phys, delta_s=self.delta_s, r_local=self.r_local, 
                 rho=self.rho, alpha1=self.alpha1, M_max=self.M_safe_max
             )
             
         if self.w_conn > 0:
             loss += self.w_conn * connectivity_loss(
-                p=p, xyz=xyz_phys, r_connect=self.r_connect, delta_c=self.delta_c
+                p=p_joint, xyz=xyz_phys, r_connect=self.r_connect, delta_c=self.delta_c
             )
             
         if self.w_cost > 0:
             l_cost, p_c = cost_loss(
-                p=p, xyz=xyz_phys, f_start=f_start, f_goal=f_goal,
+                p=p_joint, xyz=xyz_phys, f_start=f_start, f_goal=f_goal,
                 delta_s=self.delta_s, R_nms=self.R_nms, K_local=self.K_local, 
                 delta_d=self.delta_d, K_pairs=self.K_pairs, 
                 r_corridor=self.r_corridor, rho=self.rho, 

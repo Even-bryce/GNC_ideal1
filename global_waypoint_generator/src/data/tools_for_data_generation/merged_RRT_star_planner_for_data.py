@@ -933,11 +933,19 @@ def plot_sample_scores(xyz, labels, best_path, waypoints, extracted_wps, map_dim
     """
     可视化生成的样本点及其得分，同时对比真值航路点与聚类提取的航路点
     """
+
+    if labels.ndim == 2 and labels.shape[1] == 2:
+        # 通道 0 是 Tube，通道 1 是 Waypoint
+        # 这里演示融合显示，或者你可以只看 Waypoint：vis_scores = labels[:, 1]
+        vis_scores = np.max(labels, axis=1)
+    else:
+        vis_scores = labels
+
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection='3d')
 
     # 1. 绘制采样点 (散点图)
-    scores = labels.flatten()
+    scores = vis_scores.flatten()
     p = ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], 
                    c=scores, cmap='jet', s=scores*50 + 2, alpha=0.6, label='Sampled Points')
     fig.colorbar(p, ax=ax, label='Score (Label)')
@@ -2294,6 +2302,328 @@ def save_sample4(
         # 传递给统一的绘图函数
         plot_sample_scores(xyz, labels, best_path, waypoints, extracted_wps_physical, env_map["map_dim"])
 
+def save_sample5(
+    env_map,
+    file_path,
+    best_path,      # [K, 3] 真实最优路径的一系列点 (密集)
+    waypoints,      # [M, 3] 真实路径的关键航路点 (稀疏，包含起点和终点)
+    N_attempts=4096,
+    alpha=1.0,      # 路径基础分权重
+    sigma1=0.05,    # 路段宽度 (此时代表占地图比例，如 0.05 代表 5% 的地图跨度)
+    sigma2=0.02,    # 关键点精度 (同上)
+    eps=1e-8,
+    visualize=False
+):
+    """
+    生成并保存一个训练样本 (.npz) - 异向高斯自适应版本
+    针对 Z 轴跨度远小于 XY 轴的情况，自动生成扁平的椭球状高斯标签。
+    """
+    
+    # ==========================================
+    # 内部辅助函数
+    # ==========================================
+    def extract_waypoints(points, scores, eps=0.15, peak_radius=0.15, z_weight=1.0):
+        if len(points) == 0:
+            return np.empty((0, 3))
+
+        # ================================
+        # ⭐ Step 0: Z方向加权（拉伸Z轴距离，切断上下层连通）
+        # ================================
+        points_scaled = points.copy()
+        points_scaled[:, 2] *= z_weight
+
+        # ================================
+        # Step 1: 局部极大值 (寻找峰值候选点)
+        # ================================
+        tree = KDTree(points_scaled)
+        peaks = []
+        peak_scores = []
+
+        for i, p in enumerate(points_scaled):
+            # 找周围半径内的邻居
+            idx = tree.query_ball_point(p, r=peak_radius)
+
+            is_peak = True
+            for j in idx:
+                # 如果周围有比自己得分严格更高的点，那自己就不是局部的绝对波峰
+                if scores[j] > scores[i]:
+                    is_peak = False
+                    break
+
+            if is_peak:
+                peaks.append(points[i])  # ⚠️ 记录原始坐标
+                peak_scores.append(scores[i])
+
+        if len(peaks) == 0:
+            return np.empty((0, 3))
+
+        peaks = np.array(peaks)
+        peak_scores = np.array(peak_scores)
+
+        # ================================
+        # ⭐ Step 2: DBSCAN 聚类（融合相近的局部极值点）
+        # ================================
+        peaks_scaled = peaks.copy()
+        peaks_scaled[:, 2] *= z_weight
+
+        clustering = DBSCAN(eps=eps, min_samples=1).fit(peaks_scaled)
+        labels = clustering.labels_
+
+        waypoints = []
+
+        for label in set(labels):
+            if label == -1:
+                continue
+
+            mask = (labels == label)
+            cluster_points = peaks[mask]
+            cluster_scores = peak_scores[mask]
+
+            # 在同属于一个波峰簇的候选点中，选得分最高的那一个作为最终航路点
+            best_idx = np.argmax(cluster_scores)
+            waypoints.append(cluster_points[best_idx])
+
+        return np.array(waypoints)
+
+    def check_collision(point, obstacles):
+        px, py, pz = point
+        for (ox, oy, zmin, zmax, r_crash, _) in obstacles:
+            if zmin <= pz <= zmax:
+                if (px - ox)**2 + (py - oy)**2 <= r_crash**2:
+                    return True
+        return False
+
+    def get_min_distance_to_obstacles(point, obstacles):
+        px, py, pz = point
+        min_dist = float('inf')
+        for (ox, oy, zmin, zmax, r_crash, _) in obstacles:
+            d_hor = np.sqrt((px - ox)**2 + (py - oy)**2) - r_crash
+            if pz > zmax: d_ver = pz - zmax
+            elif pz < zmin: d_ver = zmin - pz
+            else: d_ver = 0.0
+
+            if d_hor > 0 and d_ver == 0: dist = d_hor
+            elif d_hor <= 0 and d_ver > 0: dist = d_ver
+            elif d_hor > 0 and d_ver > 0: dist = np.sqrt(d_hor**2 + d_ver**2)
+            else: dist = 0.0 
+            
+            if dist < min_dist: min_dist = dist
+        return min_dist
+
+    def get_nearest_obstacle_normal(point, obstacles):
+        px, py, pz = point
+        min_dist = float('inf')
+        best_normal = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+
+        for (ox, oy, zmin, zmax, r_crash, _) in obstacles:
+            dx = px - ox
+            dy = py - oy
+            d_xy = np.sqrt(dx**2 + dy**2) + eps 
+            
+            ux, uy = dx / d_xy, dy / d_xy
+            dist_xy = d_xy - r_crash
+            
+            dist_z, vz = 0.0, 0.0
+            if pz > zmax:
+                dist_z, vz = pz - zmax, 1.0
+            elif pz < zmin:
+                dist_z, vz = zmin - pz, -1.0
+
+            curr_dist = float('inf')
+            if dist_xy > 0 and dist_z <= 0:   
+                curr_dist = dist_xy
+            elif dist_xy <= 0 and dist_z > 0: 
+                curr_dist = dist_z
+            elif dist_xy > 0 and dist_z > 0:  
+                curr_dist = np.sqrt(dist_xy**2 + dist_z**2)
+            else: 
+                curr_dist = 0.0
+            
+            if curr_dist < min_dist:
+                min_dist = curr_dist
+                nx, ny, nz = 0.0, 0.0, 0.0
+                
+                if dist_xy > 0 and dist_z <= 0:   
+                    nx, ny, nz = ux, uy, 0.0
+                elif dist_xy <= 0 and dist_z > 0: 
+                    nx, ny, nz = 0.0, 0.0, vz
+                elif dist_xy > 0 and dist_z > 0:  
+                    vx, vy, vz_vec = dist_xy * ux, dist_xy * uy, dist_z * vz
+                    norm = np.sqrt(vx**2 + vy**2 + vz_vec**2) + eps
+                    nx, ny, nz = vx/norm, vy/norm, vz_vec/norm
+                else:
+                    nx, ny, nz = ux, uy, 0.0
+                    
+                best_normal = np.array([nx, ny, nz], dtype=np.float32)
+
+        return best_normal
+
+    def point_to_segment_distance(P, A, B):
+        AB = B - A
+        AP = P - A
+        ab_sq = np.dot(AB, AB) + eps
+        t = np.dot(AP, AB) / ab_sq
+        t = np.clip(t, 0.0, 1.0)
+        Proj = A + t[:, np.newaxis] * AB
+        return np.linalg.norm(P - Proj, axis=1)
+
+    # ==========================================
+    # 1. 预处理输入数据
+    # ==========================================
+    path_arr = np.asarray(best_path, dtype=np.float32)   
+    wp_arr   = np.asarray(waypoints, dtype=np.float32)   
+    
+    S = wp_arr[0]
+    G = wp_arr[-1]
+    
+    Lx, Ly, Lz = env_map["map_dim"]
+    xyz_min = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    xyz_max = np.array([Lx, Ly, Lz], dtype=np.float32)
+    obstacles = env_map["obstacles"]
+    
+    center = 0.5 * (xyz_min + xyz_max)
+    scale = max(Lx, Ly, Lz)
+
+    # ==========================================
+    # 2. 批量采样 (One-Pass)
+    # ==========================================
+    # 随机撒点
+    sampler = qmc.Sobol(d=3, scramble=True) 
+    
+    # 最好使用 2 的幂次方来最大化均匀性，不过 N_attempts=4096 刚好是 2^12，非常完美
+    sobol_norm = sampler.random_base2(m=int(np.log2(N_attempts))) 
+    
+    # 将 [0, 1] 的均匀点映射到真实的物理地图尺度上
+    candidates = xyz_min + sobol_norm * (xyz_max - xyz_min)
+
+    valid_pts = []
+    
+    for p in candidates:
+        if not check_collision(p, obstacles):
+            valid_pts.append(p)
+
+    if len(valid_pts) == 0:
+        pts = wp_arr.copy()
+    else:
+        pts = np.asarray(valid_pts, dtype=np.float32)
+
+    # ==========================================
+    # 3. 组合最终点集
+    # ==========================================
+    xyz = np.vstack([S[None], G[None], pts]) 
+    N_real = xyz.shape[0]
+
+    # ==========================================
+    # 4. 构建输入特征 (Input Features)
+    # （这里保持不变，给网络喂的依然是真实的几何比例）
+    # ==========================================
+    xyz_norm = (xyz - center) / (scale + eps)
+    
+    d_obs = np.array([get_min_distance_to_obstacles(p, obstacles) for p in xyz], dtype=np.float32)
+    d_obs_norm = d_obs / (scale + eps)
+
+    obs_normals = np.array([get_nearest_obstacle_normal(p, obstacles) for p in xyz], dtype=np.float32)
+    
+    d_s = np.linalg.norm(xyz - S[None], axis=1)
+    d_g = np.linalg.norm(xyz - G[None], axis=1)
+    denom = d_s + d_g + eps
+    f_start = d_g / denom
+    f_goal  = d_s / denom
+    
+    points = np.stack([
+        xyz_norm[:, 0], xyz_norm[:, 1], xyz_norm[:, 2],          # Index 0, 1, 2
+        f_start, f_goal,                                         # Index 3, 4
+        d_obs_norm,                                              # Index 5
+        obs_normals[:, 0], obs_normals[:, 1], obs_normals[:, 2], # Index 6, 7, 8
+    ], axis=1).astype(np.float32)
+
+    # ==========================================
+    # 5. 标签计算 (Label Generation) - ⭐双通道解耦版
+    # ==========================================
+    # 💡 核心修改：创建两个通道。通道0: 管道(Tube), 通道1: 关键点(Waypoint)
+    labels = np.zeros((N_real, 2), dtype=np.float32)
+    
+    dim_scale = np.array([Lx, Ly, Lz], dtype=np.float32) + eps
+    
+    # 坐标转换到 ratio 空间
+    xyz_ratio = xyz / dim_scale
+    wp_ratio = wp_arr / dim_scale
+    path_ratio = path_arr / dim_scale
+    
+    # --- [通道 1] 计算 y_point (高斯球航路点) ---
+    mid_wps_ratio = wp_ratio[1:-1]
+    if len(mid_wps_ratio) > 0:
+        dists_to_mid_wps = np.linalg.norm(xyz_ratio[:, None, :] - mid_wps_ratio[None, :, :], axis=2)
+        d_point_ratio = np.min(dists_to_mid_wps, axis=1)
+        # 高斯球得分：只存在于通道 1
+        y_point = 1.0 * np.exp(- (d_point_ratio ** 2) / (2 * sigma2**2))
+    else:
+        y_point = np.zeros(N_real, dtype=np.float32)
+
+    # --- [通道 0] 计算 y_line (管状路径) ---
+    d_line_ratio = np.full(N_real, float('inf'), dtype=np.float32)
+    for k in range(len(path_ratio) - 1):
+        A_ratio = path_ratio[k]
+        B_ratio = path_ratio[k+1]
+        d_segment = point_to_segment_distance(xyz_ratio, A_ratio, B_ratio)
+        d_line_ratio = np.minimum(d_line_ratio, d_segment)
+
+    # 管道得分：只存在于通道 0
+    y_line = alpha * np.exp(- (d_line_ratio ** 2) / (2 * sigma1**2))
+    
+    # ==========================================
+    # 💡 赋值逻辑：不再取 Maximum，而是分家
+    # ==========================================
+    labels[:, 0] = y_line   # 通道 0 负责铺路 (Tube)
+    labels[:, 1] = y_point  # 通道 1 负责点灯 (Waypoint)
+
+    # 起终点在两个通道都设为 1.0 (或者根据你的需求只设在 Tube)
+    labels[0, 0], labels[0, 1] = 1.0, 1.0 
+    labels[1, 0], labels[1, 1] = 1.0, 1.0
+
+    # ==========================================
+    # 6. 保存 (注意保存 waypoints 原始坐标)
+    # ==========================================
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    # 这里的 labels 已经是 [N, 2]
+    np.savez(file_path, points=points, labels=labels, waypoints=wp_arr)
+    
+    if visualize:
+        print(f"[Visualizing] 聚类提取仅针对通道1(Waypoint)...")
+        
+        # 💡 核心修改：只根据通道 1 的得分筛选聚类候选点
+        # 即使某个点在管道中心（通道0得分高），但如果它不是拐点（通道1得分低），也会被过滤
+        waypoint_scores = labels[:, 1] 
+        mask = waypoint_scores > 0.8 
+        
+        high_score_xyz = xyz[mask]
+        high_score_waypoint_labels = waypoint_scores[mask]
+        
+        if len(high_score_xyz) > 0:
+            high_score_ratio = high_score_xyz / dim_scale
+            
+            # 只对“球标签”进行聚类提取
+            extracted_wps_ratio = extract_waypoints(
+                points=high_score_ratio, 
+                scores=high_score_waypoint_labels, 
+                eps=0.15,        
+                peak_radius=0.15,
+                z_weight=1.0 
+            )
+            
+            if len(extracted_wps_ratio) > 0:
+                extracted_wps_physical = extracted_wps_ratio * dim_scale
+            else:
+                extracted_wps_physical = np.empty((0, 3))
+        else:
+            extracted_wps_physical = np.empty((0, 3))
+            
+        # 绘图时可以分别显示两个通道
+        plot_sample_scores(xyz, labels[:,0], best_path, waypoints, extracted_wps_physical, env_map["map_dim"])
+        plot_sample_scores(xyz, labels[:,1], best_path, waypoints, extracted_wps_physical, env_map["map_dim"])
+
+
+
 def is_path_meaningful(waypoints, min_angle_deg=15.0):
     """
     轨迹质量质检员：
@@ -2346,7 +2676,7 @@ if __name__ == '__main__':
     BASE_SEED = 39         # 基础随机种子
     
     # 保存路径
-    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data9"
+    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data11"
     
     # RRT* 参数
     R_AGENT_CRASH = 1.2
@@ -2452,21 +2782,21 @@ if __name__ == '__main__':
             file_name = f"map{map_id}_task{saved_tasks}.npz"
             full_save_path = os.path.join(SAVE_DIR, file_name)
             
-            save_sample4(
+            save_sample5(
                 env_map,
                 file_path=full_save_path, 
                 best_path=path,
                 waypoints=straight_waypoints,
                 N_attempts=4096,
-                alpha=0.3,
-                sigma1=0.3,
+                alpha=1,
+                sigma1=0.25,
                 sigma2=0.225,
                 eps=1e-8,
-                visualize=True if saved_tasks < 0 else False  # 仅可视化前10个高质量任务
+                visualize=True if saved_tasks < 10 else False  # 仅可视化前10个高质量任务
             )
             
-            if saved_tasks < 0: 
-                plot_tree_and_path_and_waypoints(env_map, planner.node_list, path, straight_waypoints)
+            # if saved_tasks < 0: 
+            #     plot_tree_and_path_and_waypoints(env_map, planner.node_list, path, straight_waypoints)
             
             # 成功保存一个，计数器加 1
             saved_tasks += 1

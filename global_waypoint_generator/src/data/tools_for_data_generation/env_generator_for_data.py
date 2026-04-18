@@ -1,7 +1,7 @@
 import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
-from .res_show_for_data import plot_map
+from res_show_for_data import plot_map
 import random
 
 def env_generator(

@@ -18,15 +18,15 @@ SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\checkpoints"
 
 # 2. 真实的训练数据路径
 # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
-DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data9"
+DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data10"
 # DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
 
 START_EPOCH = 1  # 如果从头训练填 1；如果调参直接从第 41 轮开始，填 41
 PRETRAINED_CKPT = r"C:\Users\Administrator\Desktop\experiments\checkpoints\ckpt_epoch_40.pth" # 填入你第40轮保存的权重路径
 
-GAMMA = 2
-ALPHA = 0.6
-TOTAL_EPOCHS = 70        
+GAMMA = 1.5
+ALPHA = 0.9
+TOTAL_EPOCHS = 40        
 # ---------------------      
 # ---------------------
 
@@ -57,16 +57,14 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
     max_probs, neg_max_probs, neg_fpr_list = [], [], []
     se_mean_probs, mid_mean_probs, mid_fnr_list = [], [], []
     
+    ep_l_tube, ep_l_wp = [], [] # 💡 新增：记录两个头的 Loss
     ep_l_str, ep_l_cost = [], []
     ep_phi_s, ep_phi_c = [], []
 
-    # ==========================================
-    # 💡 修改点 1：解包接收 mask
-    # ==========================================
     for batch_idx, (points, targets, mask, gt_waypoints_list) in enumerate(loader):
         points = points.to(device)
-        targets = targets.to(device)
-        mask = mask.to(device) # 💡 将 mask 也放入 GPU
+        targets = targets.to(device) # 此时 targets 是 [B, N, 2]
+        mask = mask.to(device)       # mask 是 [B, N]
 
         if points.shape[-1] >= 5:
             points = points.permute(0, 2, 1) 
@@ -75,46 +73,49 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
 
         optimizer.zero_grad()
         
-        # ==========================================
-        # 💡 修改点 2：把 mask 传给模型和 Loss
-        # ==========================================
+        # 前向传播 (双头输出 logits: [B, N, 2])
         output = model(points, mask=mask) 
         logits = output[0] if isinstance(output, (tuple, list)) else output
 
+        # 计算双头联合 Loss 
         loss, metrics = criterion(logits, targets, points, mask=mask)
         
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
         
+        # 记录各项 Loss
+        ep_l_tube.append(metrics["loss_tube"])
+        ep_l_wp.append(metrics["loss_wp"])
         ep_l_str.append(metrics["loss_straight"])
         ep_l_cost.append(metrics["loss_cost"])
         ep_phi_s.append(metrics["phi_s"])
         ep_phi_c.append(metrics["phi_c"])
 
         # ==========================================
-        # 💡 修改点 3：统计指标时，使用 mask 过滤假点
+        # 💡 专门针对“管道头(Tube)”的指标统计
         # ==========================================
         with torch.no_grad():
-            probs = torch.sigmoid(logits)
-            if probs.dim() == 3: probs = probs.squeeze(-1)   # [B, N]
-            if targets.dim() == 3: targets = targets.squeeze(-1) # [B, N]
-
-            # 提取全图最大概率（仅限有效点）
-            if mask.sum() > 0:
-                max_probs.append(probs[mask].max().item())
+            probs = torch.sigmoid(logits) # [B, N, 2]
             
-            # 💡 负样本指标计算 (增加 & mask)
-            neg_mask = (targets < 0.1) & mask 
+            # 💡 既然要看管道，就把管道的预测和真值提取出来 (第 0 通道)
+            probs_tube = probs[..., 0]      # [B, N]
+            targets_tube = targets[..., 0]  # [B, N]
+
+            if mask.sum() > 0:
+                max_probs.append(probs_tube[mask].max().item())
+            
+            # 负样本指标计算 (评估把“墙壁”误认为“管道”的概率)
+            neg_mask = (targets_tube < 0.5) & mask 
             if neg_mask.sum() > 0:
-                neg_probs = probs[neg_mask]
+                neg_probs = probs_tube[neg_mask] # 👈 必须用 probs_tube
                 neg_max_probs.append(neg_probs.max().item())
                 num_false_pos = (neg_probs > 0.5).float().sum()
                 fpr = num_false_pos / neg_probs.numel()
                 neg_fpr_list.append(fpr.item())
 
-            # 💡 正样本指标计算 (增加 & mask)
-            pos_mask = (targets > 0.8) & mask
+            # 正样本指标计算 (评估真正的管道有没有被正确识别)
+            pos_mask = (targets_tube > 0.8) & mask
             if points.shape[1] >= 5:  
                 f_start = points[:, 3, :]  
                 f_goal  = points[:, 4, :]
@@ -124,29 +125,33 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch_idx):
                 mask_MID = pos_mask & (~is_start_end)   
 
                 if mask_SE.sum() > 0:
-                    se_mean_probs.append(probs[mask_SE].mean().item())
+                    se_mean_probs.append(probs_tube[mask_SE].mean().item()) # 👈 probs_tube
                 if mask_MID.sum() > 0:
-                    mid_probs = probs[mask_MID]
+                    mid_probs = probs_tube[mask_MID] # 👈 probs_tube
                     mid_mean_probs.append(mid_probs.mean().item())
                     num_false_neg = (mid_probs < 0.5).float().sum()
                     fnr = num_false_neg / mid_probs.numel()
                     mid_fnr_list.append(fnr.item())
 
-    # --- 后面的均值计算和 Print 保持原样 ---
+    # --- 后面的均值计算和 Print ---
     avg_neg_max = np.mean(neg_max_probs) if len(neg_max_probs) > 0 else 0.0
     avg_fpr = np.mean(neg_fpr_list) if len(neg_fpr_list) > 0 else 0.0
     avg_se_mean = np.mean(se_mean_probs) if len(se_mean_probs) > 0 else 0.0
     avg_mid_mean = np.mean(mid_mean_probs) if len(mid_mean_probs) > 0 else 0.0
     avg_mid_fnr = np.mean(mid_fnr_list) if len(mid_fnr_list) > 0 else 0.0  
     
+    avg_l_tube = np.mean(ep_l_tube) if len(ep_l_tube) > 0 else 0.0
+    avg_l_wp = np.mean(ep_l_wp) if len(ep_l_wp) > 0 else 0.0
     avg_l_str = np.mean(ep_l_str) if len(ep_l_str) > 0 else 0.0
     avg_l_cost = np.mean(ep_l_cost) if len(ep_l_cost) > 0 else 0.0
     avg_phi_s = np.mean(ep_phi_s) if len(ep_phi_s) > 0 else 0.0
     avg_phi_c = np.mean(ep_phi_c) if len(ep_phi_c) > 0 else 0.0
 
+    # 💡 打印时加入了管道 Loss 和 航路点 Loss 的对比
     print(f"[Debug Ep{epoch_idx}] {phase_name} |\n"
           f"  > Probs: SE:{avg_se_mean:.3f} | Mid:{avg_mid_mean:.3f} | NegMax:{avg_neg_max:.3f} | FPR:{avg_fpr:.4f} | FNR:{avg_mid_fnr:.4f}\n"
-          f"  > Graph: Phi_s:{avg_phi_s:.3f} | Phi_c:{avg_phi_c:.3f} | L_str:{avg_l_str:.4f} | L_cost:{avg_l_cost:.4f}") 
+          f"  > Loss : Tube:{avg_l_tube:.4f} | WP:{avg_l_wp:.4f} | L_str:{avg_l_str:.4f} | L_cost:{avg_l_cost:.4f}\n"
+          f"  > Graph: Phi_s:{avg_phi_s:.3f} | Phi_c:{avg_phi_c:.3f}") 
 
     return total_loss / len(loader)
 class EarlyStopping:
@@ -178,30 +183,95 @@ class EarlyStopping:
                 self.early_stop = True
 
 @torch.no_grad()
-@torch.no_grad()
 def validate(model, loader, criterion, device):
     model.eval()
     total_loss = 0.0
+    
+    # ==========================================
+    # 💡 升级 1：初始化细粒度指标的容器
+    # ==========================================
+    val_l_tube, val_l_wp = [], []
+    val_l_str, val_l_cost = [], []
+    
+    neg_fpr_list, mid_fnr_list = [], []
+    se_mean_probs, mid_mean_probs = [], []
 
-    # 💡 1. 接收 mask
-    for points, targets, mask, gt_waypoints_list in loader:
-        points = points.to(device)
-        targets = targets.to(device)
-        mask = mask.to(device) # 💡 将 mask 放入 GPU
-        
-        if points.shape[-1] >= 5:
-            points = points.permute(0, 2, 1)
+    # 💡 升级 2：整个验证过程直接套一层 torch.no_grad()，省显存又加速
+    with torch.no_grad():
+        for points, targets, mask, gt_waypoints_list in loader:
+            points = points.to(device)
+            targets = targets.to(device) # [B, N, 2]
+            mask = mask.to(device)       # [B, N]
             
-        xyz = points[:, :3, :].permute(0, 2, 1).contiguous()
+            if points.shape[-1] >= 5:
+                points = points.permute(0, 2, 1)
+                
+            xyz = points[:, :3, :].permute(0, 2, 1).contiguous()
 
-        # 💡 2. 传入 mask 给模型
-        output = model(points, mask=mask)
-        logits = output[0] if isinstance(output, (tuple, list)) else output
+            # 前向传播
+            output = model(points, mask=mask)
+            logits = output[0] if isinstance(output, (tuple, list)) else output
 
-        # 💡 3. 传入 mask 给 criterion
-        loss, _ = criterion(logits, targets, points, mask=mask)
-        total_loss += loss.item()
+            # 接收组合 Loss 和指标字典
+            loss, metrics = criterion(logits, targets, points, mask=mask)
+            total_loss += loss.item()
 
+    #         # ==========================================
+    #         # 💡 升级 3：收集验证集上的各路 Loss
+    #         # ==========================================
+    #         val_l_tube.append(metrics["loss_tube"])
+    #         val_l_wp.append(metrics["loss_wp"])
+    #         val_l_str.append(metrics["loss_straight"])
+    #         val_l_cost.append(metrics["loss_cost"])
+
+    #         # ==========================================
+    #         # 💡 升级 4：计算验证集上的航路点预测准度
+    #         # ==========================================
+    #         probs = torch.sigmoid(logits)
+    #         probs_wp = probs[..., 1]      # 依然只取航路点通道 [B, N]
+    #         targets_wp = targets[..., 1]  # 依然只取航路点真值 [B, N]
+
+    #         # 验证集负样本 FPR (假阳性率 - 把墙壁当拐点的概率)
+    #         neg_mask = (targets_wp < 0.1) & mask 
+    #         if neg_mask.sum() > 0:
+    #             neg_probs = probs_wp[neg_mask]
+    #             num_false_pos = (neg_probs > 0.5).float().sum()
+    #             fpr = num_false_pos / neg_probs.numel()
+    #             neg_fpr_list.append(fpr.item())
+
+    #         # 验证集正样本 FNR (假阴性率 - 漏掉真实拐点的概率)
+    #         pos_mask = (targets_wp > 0.8) & mask
+    #         if points.shape[1] >= 5:  
+    #             f_start = points[:, 3, :]  
+    #             f_goal  = points[:, 4, :]
+    #             is_start_end = (f_start > 0.95) | (f_goal > 0.95)
+                
+    #             mask_SE = pos_mask & is_start_end       
+    #             mask_MID = pos_mask & (~is_start_end)   
+
+    #             if mask_SE.sum() > 0:
+    #                 se_mean_probs.append(probs_wp[mask_SE].mean().item())
+    #             if mask_MID.sum() > 0:
+    #                 mid_probs = probs_wp[mask_MID]
+    #                 mid_mean_probs.append(mid_probs.mean().item())
+    #                 num_false_neg = (mid_probs < 0.5).float().sum()
+    #                 fnr = num_false_neg / mid_probs.numel()
+    #                 mid_fnr_list.append(fnr.item())
+
+    # # --- 汇总打印验证集指标 ---
+    # avg_l_tube = np.mean(val_l_tube) if len(val_l_tube) > 0 else 0.0
+    # avg_l_wp = np.mean(val_l_wp) if len(val_l_wp) > 0 else 0.0
+    # avg_fpr = np.mean(neg_fpr_list) if len(neg_fpr_list) > 0 else 0.0
+    # avg_fnr = np.mean(mid_fnr_list) if len(mid_fnr_list) > 0 else 0.0
+    # avg_se = np.mean(se_mean_probs) if len(se_mean_probs) > 0 else 0.0
+    # avg_mid = np.mean(mid_mean_probs) if len(mid_mean_probs) > 0 else 0.0
+
+    # print(f"  [Validation] Total Loss: {total_loss / len(loader):.4f}\n"
+    #       f"  > Loss: Tube:{avg_l_tube:.4f} | WP:{avg_l_wp:.4f}\n"
+    #       f"  > Acc : FPR(误报):{avg_fpr:.4f} | FNR(漏报):{avg_fnr:.4f} | SE_Prob:{avg_se:.3f} | Mid_Prob:{avg_mid:.3f}")
+
+    # # 可以选择返回一个元组或者字典，方便外部保存最优模型
+    # # 这里依然返回 total_loss 以兼容你外面的主干代码
     return total_loss / len(loader)
 
 def plot_loss_curve(train_loss, val_loss, save_dir):
