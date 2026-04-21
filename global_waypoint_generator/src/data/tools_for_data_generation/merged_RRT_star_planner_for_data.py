@@ -7,7 +7,6 @@ import math
 import time
 from mpl_toolkits.mplot3d import Axes3D
 from env_generator_for_data import env_generator, env_generator_cluster
-from res_show_for_data import plot_tree_and_path, plot_tree_and_path_and_waypoints
 from scipy.spatial import KDTree
 from sklearn.cluster import DBSCAN
 from scipy.stats import qmc
@@ -2551,7 +2550,7 @@ def save_sample5(
     path_ratio = path_arr / dim_scale
     
     # --- [通道 1] 计算 y_point (高斯球航路点) ---
-    mid_wps_ratio = wp_ratio[1:-1]
+    mid_wps_ratio = wp_ratio
     if len(mid_wps_ratio) > 0:
         dists_to_mid_wps = np.linalg.norm(xyz_ratio[:, None, :] - mid_wps_ratio[None, :, :], axis=2)
         d_point_ratio = np.min(dists_to_mid_wps, axis=1)
@@ -2792,11 +2791,9 @@ if __name__ == '__main__':
                 sigma1=0.25,
                 sigma2=0.225,
                 eps=1e-8,
-                visualize=True if saved_tasks < 10 else False  # 仅可视化前10个高质量任务
+                visualize=True if saved_tasks < 0 else False  # 仅可视化前10个高质量任务
             )
             
-            # if saved_tasks < 0: 
-            #     plot_tree_and_path_and_waypoints(env_map, planner.node_list, path, straight_waypoints)
             
             # 成功保存一个，计数器加 1
             saved_tasks += 1
