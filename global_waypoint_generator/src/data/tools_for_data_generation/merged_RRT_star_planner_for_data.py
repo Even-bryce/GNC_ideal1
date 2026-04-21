@@ -2550,7 +2550,7 @@ def save_sample5(
     path_ratio = path_arr / dim_scale
     
     # --- [通道 1] 计算 y_point (高斯球航路点) ---
-    mid_wps_ratio = wp_ratio
+    mid_wps_ratio = wp_ratio[1:-1]
     if len(mid_wps_ratio) > 0:
         dists_to_mid_wps = np.linalg.norm(xyz_ratio[:, None, :] - mid_wps_ratio[None, :, :], axis=2)
         d_point_ratio = np.min(dists_to_mid_wps, axis=1)
@@ -2574,7 +2574,7 @@ def save_sample5(
     # 💡 赋值逻辑：不再取 Maximum，而是分家
     # ==========================================
     labels[:, 0] = y_line   # 通道 0 负责铺路 (Tube)
-    labels[:, 1] = y_point  # 通道 1 负责点灯 (Waypoint)
+    labels[:, 1] = np.maximum(0.3*y_line, y_point)  # 通道 1 负责点灯 (Waypoint)
 
     # 起终点在两个通道都设为 1.0 (或者根据你的需求只设在 Tube)
     labels[0, 0], labels[0, 1] = 1.0, 1.0 
@@ -2675,7 +2675,7 @@ if __name__ == '__main__':
     BASE_SEED = 39         # 基础随机种子
     
     # 保存路径
-    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data11"
+    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data12"
     
     # RRT* 参数
     R_AGENT_CRASH = 1.2
@@ -2788,7 +2788,7 @@ if __name__ == '__main__':
                 waypoints=straight_waypoints,
                 N_attempts=4096,
                 alpha=1,
-                sigma1=0.25,
+                sigma1=0.3,
                 sigma2=0.225,
                 eps=1e-8,
                 visualize=True if saved_tasks < 0 else False  # 仅可视化前10个高质量任务

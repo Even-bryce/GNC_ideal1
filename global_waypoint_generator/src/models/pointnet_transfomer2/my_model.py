@@ -352,25 +352,115 @@ class PointTransformerBlock(nn.Module):
         x = self.relu(x)
         return [p, x, o]
 
+# class PointTransformerSeg(nn.Module):
+#     def __init__(self, block, blocks, c=6, k=13, dropout_p=0):
+#         super().__init__()
+#         self.c = c
+#         self.in_planes, planes = c, [32, 64, 128, 256, 512]
+#         share_planes = 8
+#         stride, nsample = [1, 4, 4, 4, 4], [8, 16, 16, 16, 16]
+#         self.enc1 = self._make_enc(block, planes[0], blocks[0], share_planes, stride=stride[0], nsample=nsample[0])  # N/1
+#         self.enc2 = self._make_enc(block, planes[1], blocks[1], share_planes, stride=stride[1], nsample=nsample[1])  # N/4
+#         self.enc3 = self._make_enc(block, planes[2], blocks[2], share_planes, stride=stride[2], nsample=nsample[2])  # N/16
+#         self.enc4 = self._make_enc(block, planes[3], blocks[3], share_planes, stride=stride[3], nsample=nsample[3])  # N/64
+#         self.enc5 = self._make_enc(block, planes[4], blocks[4], share_planes, stride=stride[4], nsample=nsample[4])  # N/256
+#         self.dec5 = self._make_dec(block, planes[4], 2, share_planes, nsample=nsample[4], is_head=True)  # transform p5
+#         self.dec4 = self._make_dec(block, planes[3], 2, share_planes, nsample=nsample[3])  # fusion p5 and p4
+#         self.dec3 = self._make_dec(block, planes[2], 2, share_planes, nsample=nsample[2])  # fusion p4 and p3
+#         self.dec2 = self._make_dec(block, planes[1], 2, share_planes, nsample=nsample[1])  # fusion p3 and p2
+#         self.dec1 = self._make_dec(block, planes[0], 2, share_planes, nsample=nsample[0])  # fusion p2 and p1
+#         self.cls = nn.Sequential(nn.Linear(planes[0], planes[0]), nn.BatchNorm1d(planes[0]), nn.ReLU(inplace=True), nn.Dropout(p=dropout_p), nn.Linear(planes[0], k))
+        
+
+#     def _make_enc(self, block, planes, blocks, share_planes=8, stride=1, nsample=16):
+#         layers = []
+#         layers.append(TransitionDown(self.in_planes, planes * block.expansion, stride, nsample))
+#         self.in_planes = planes * block.expansion
+#         for _ in range(1, blocks):
+#             layers.append(block(self.in_planes, self.in_planes, share_planes, nsample=nsample))
+#         return nn.Sequential(*layers)
+
+#     def _make_dec(self, block, planes, blocks, share_planes=8, nsample=16, is_head=False):
+#         layers = []
+#         layers.append(TransitionUp(self.in_planes, None if is_head else planes * block.expansion))
+#         self.in_planes = planes * block.expansion
+#         for _ in range(1, blocks):
+#             layers.append(block(self.in_planes, self.in_planes, share_planes, nsample=nsample))
+#         return nn.Sequential(*layers)
+
+#     def forward(self, pxo):
+#         p0, x0, o0 = pxo  # (n, 3), (n, c), (b)
+#         # 如果 self.c > 3，说明除了坐标还有额外特征，将其拼接
+#         x0 = p0 if self.c == 3 else torch.cat((p0, x0), 1)
+#         p1, x1, o1 = self.enc1([p0, x0, o0])
+#         p2, x2, o2 = self.enc2([p1, x1, o1])
+#         p3, x3, o3 = self.enc3([p2, x2, o2])
+#         p4, x4, o4 = self.enc4([p3, x3, o3])
+#         p5, x5, o5 = self.enc5([p4, x4, o4])
+#         x5 = self.dec5[1:]([p5, self.dec5[0]([p5, x5, o5]), o5])[1]
+#         x4 = self.dec4[1:]([p4, self.dec4[0]([p4, x4, o4], [p5, x5, o5]), o4])[1]
+#         x3 = self.dec3[1:]([p3, self.dec3[0]([p3, x3, o3], [p4, x4, o4]), o3])[1]
+#         x2 = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3, o3]), o2])[1]
+#         x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2, o2]), o1])[1]
+#         x = self.cls(x1)
+#         # # 💡 新的输出逻辑
+#         # feat = self.head_base(x1)
+        
+#         # out_recall = self.expert_recall(feat)
+#         # out_refine = self.expert_refine(feat)
+        
+#         # # 计算门控权重
+#         # gating_weights = self.gate(feat) # [N, 2]
+        
+#         # # 动态融合：w1 * expert1 + w2 * expert2
+#         # x = gating_weights[:, 0:1] * out_recall + gating_weights[:, 1:2] * out_refine
+#         return x
+
 class PointTransformerSeg(nn.Module):
-    def __init__(self, block, blocks, c=6, k=13, dropout_p=0):
+    def __init__(self, block, blocks=[2, 3, 3, 2], c=6, k=13, dropout_p=0):
         super().__init__()
         self.c = c
-        self.in_planes, planes = c, [32, 64, 128, 256, 512]
-        share_planes = 8
-        stride, nsample = [1, 4, 4, 4, 4], [8, 16, 16, 16, 16]
-        self.enc1 = self._make_enc(block, planes[0], blocks[0], share_planes, stride=stride[0], nsample=nsample[0])  # N/1
-        self.enc2 = self._make_enc(block, planes[1], blocks[1], share_planes, stride=stride[1], nsample=nsample[1])  # N/4
-        self.enc3 = self._make_enc(block, planes[2], blocks[2], share_planes, stride=stride[2], nsample=nsample[2])  # N/16
-        self.enc4 = self._make_enc(block, planes[3], blocks[3], share_planes, stride=stride[3], nsample=nsample[3])  # N/64
-        self.enc5 = self._make_enc(block, planes[4], blocks[4], share_planes, stride=stride[4], nsample=nsample[4])  # N/256
-        self.dec5 = self._make_dec(block, planes[4], 2, share_planes, nsample=nsample[4], is_head=True)  # transform p5
-        self.dec4 = self._make_dec(block, planes[3], 2, share_planes, nsample=nsample[3])  # fusion p5 and p4
-        self.dec3 = self._make_dec(block, planes[2], 2, share_planes, nsample=nsample[2])  # fusion p4 and p3
-        self.dec2 = self._make_dec(block, planes[1], 2, share_planes, nsample=nsample[1])  # fusion p3 and p2
-        self.dec1 = self._make_dec(block, planes[0], 2, share_planes, nsample=nsample[0])  # fusion p2 and p1
-        self.cls = nn.Sequential(nn.Linear(planes[0], planes[0]), nn.BatchNorm1d(planes[0]), nn.ReLU(inplace=True), nn.Dropout(p=dropout_p), nn.Linear(planes[0], k))
+        self.num_stages = len(blocks)
         
+        # 💡 1. 动态生成每层的特征维度、步长和采样点数
+        # 维度以 32 起步，每次翻倍: [32, 64, 128, 256, 512, ...]
+        planes = [32 * (2 ** i) for i in range(self.num_stages)] 
+        # 步长: 第一层为 1，后续全是 4
+        stride = [1] + [4] * (self.num_stages - 1)
+        # 采样数: 第一层为 8，后续全是 16
+        nsample = [8] + [16] * (self.num_stages - 1)
+        
+        self.in_planes = c
+        share_planes = 8
+        
+        # ==========================================
+        # 💡 2. 动态构建 Encoder (使用 nn.ModuleList)
+        # ==========================================
+        self.enc = nn.ModuleList()
+        for i in range(self.num_stages):
+            self.enc.append(
+                self._make_enc(block, planes[i], blocks[i], share_planes, stride=stride[i], nsample=nsample[i])
+            )
+            
+        # ==========================================
+        # 💡 3. 动态构建 Decoder (使用 nn.ModuleList，倒序构建)
+        # ==========================================
+        self.dec = nn.ModuleList()
+        for i in range(self.num_stages - 1, -1, -1):
+            is_head = (i == self.num_stages - 1)
+            # Decoder 的 block 数量默认固定为 2 (1个 TransitionUp + 1个 TransformerBlock)
+            self.dec.append(
+                self._make_dec(block, planes[i], 2, share_planes, nsample=nsample[i], is_head=is_head)
+            )
+
+        # 最终的分类/回归头
+        self.cls = nn.Sequential(
+            nn.Linear(planes[0], planes[0]), 
+            nn.BatchNorm1d(planes[0]), 
+            nn.ReLU(inplace=True), 
+            nn.Dropout(p=dropout_p), 
+            nn.Linear(planes[0], k)
+        )
 
     def _make_enc(self, block, planes, blocks, share_planes=8, stride=1, nsample=16):
         layers = []
@@ -390,30 +480,38 @@ class PointTransformerSeg(nn.Module):
 
     def forward(self, pxo):
         p0, x0, o0 = pxo  # (n, 3), (n, c), (b)
-        # 如果 self.c > 3，说明除了坐标还有额外特征，将其拼接
         x0 = p0 if self.c == 3 else torch.cat((p0, x0), 1)
-        p1, x1, o1 = self.enc1([p0, x0, o0])
-        p2, x2, o2 = self.enc2([p1, x1, o1])
-        p3, x3, o3 = self.enc3([p2, x2, o2])
-        p4, x4, o4 = self.enc4([p3, x3, o3])
-        p5, x5, o5 = self.enc5([p4, x4, o4])
-        x5 = self.dec5[1:]([p5, self.dec5[0]([p5, x5, o5]), o5])[1]
-        x4 = self.dec4[1:]([p4, self.dec4[0]([p4, x4, o4], [p5, x5, o5]), o4])[1]
-        x3 = self.dec3[1:]([p3, self.dec3[0]([p3, x3, o3], [p4, x4, o4]), o3])[1]
-        x2 = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3, o3]), o2])[1]
-        x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2, o2]), o1])[1]
-        x = self.cls(x1)
-        # # 💡 新的输出逻辑
-        # feat = self.head_base(x1)
         
-        # out_recall = self.expert_recall(feat)
-        # out_refine = self.expert_refine(feat)
+        curr_pxo = [p0, x0, o0]
+        enc_outputs = []
         
-        # # 计算门控权重
-        # gating_weights = self.gate(feat) # [N, 2]
+        # ==========================================
+        # 💡 4. 动态 Encoder 前向传播
+        # ==========================================
+        for enc_layer in self.enc:
+            curr_pxo = enc_layer(curr_pxo)
+            enc_outputs.append(curr_pxo)  # 存入列表，留给 Decoder 做特征融合
+            
+        # ==========================================
+        # 💡 5. 动态 Decoder 前向传播
+        # ==========================================
+        # 获取最底层的特征 (对应原来的 p5, x5, o5)
+        p_curr, x_curr, o_curr = enc_outputs[-1]
         
-        # # 动态融合：w1 * expert1 + w2 * expert2
-        # x = gating_weights[:, 0:1] * out_recall + gating_weights[:, 1:2] * out_refine
+        for i, dec_layer in enumerate(self.dec):
+            stage_idx = self.num_stages - 1 - i
+            
+            if i == 0: 
+                # 最顶层的 Decoder (对应原来的 dec5，无 skip connection)
+                x_curr = dec_layer[1:]([p_curr, dec_layer[0]([p_curr, x_curr, o_curr]), o_curr])[1]
+            else:
+                # 后续的 Decoder (对应原来的 dec4~dec1，需要通过列表读取前面 Encoder 的特征进行融合)
+                p_skip, x_skip, o_skip = enc_outputs[stage_idx]
+                x_curr = dec_layer[1:]([p_skip, dec_layer[0]([p_skip, x_skip, o_skip], [p_curr, x_curr, o_curr]), o_skip])[1]
+                p_curr, o_curr = p_skip, o_skip
+                
+        # 分类头
+        x = self.cls(x_curr)
         return x
 
 # ==========================================
@@ -421,12 +519,12 @@ class PointTransformerSeg(nn.Module):
 # ==========================================
 
 class get_model(nn.Module):
-    def __init__(self, num_classes, input_dim=8, dropout_p=0):
+    def __init__(self, num_classes, input_dim=8, dropout_p=0, blocks=[1, 2, 3, 1]):
         super(get_model, self).__init__()
         self.input_dim = input_dim
         self.backbone = PointTransformerSeg(
             block=PointTransformerBlock, 
-            blocks=[2, 3, 4, 6, 3], 
+            blocks=blocks, 
             c=input_dim, 
             k=num_classes,
             dropout_p=dropout_p

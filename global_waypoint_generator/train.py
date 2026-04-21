@@ -29,7 +29,7 @@ MODEL_A_CKPT = r"C:\Users\Administrator\Desktop\experiments\checkpoints\Stage_A\
 
 GAMMA = 2
 ALPHA = 0.6
-TOTAL_EPOCHS = 30
+TOTAL_EPOCHS = 50
 WARMUP_EPOCHS = 40    
 # ---------------------      
 # ---------------------
@@ -219,6 +219,7 @@ def train_one_epoch_B(model_B, model_A, loader, criterion, optimizer, device, ep
             
         # 2. 完美拼接！在通道维度 (dim=1) 把 9 个特征和 1 个概率拼起来
         points_with_prior = torch.cat([points, probs_A], dim=1) # 得到 [B, 10, N]
+        # points_with_prior = points
 
         # ------------------------------------------
         # 开始训练 Model B
@@ -399,6 +400,7 @@ def validate_B(model_B, model_A, loader, criterion, device, tube_thresh=0.4):
             # 2. 在通道轴 (dim=1) 拼接，得到 [B, 10, N]
             # 注意：千万不要用 dim=-1，因为你的 points 已经是 [B, C, N] 格式了
             points_with_prior = torch.cat([points, probs_A], dim=1)
+            # points_with_prior = points
 
             # 💡 5. 传入联合掩码和新特征给 Model B
             output_B = model_B(points_with_prior, mask=combined_mask)
@@ -464,7 +466,7 @@ def main():
         print("🚀 启动阶段一：训练管道探路模型 (Model A)")
         print("="*50)
         
-        model_A = get_model(num_classes=1, input_dim=real_input_dim, dropout_p=0).to(device)
+        model_A = get_model(num_classes=1, input_dim=real_input_dim, dropout_p=0.2).to(device)
         
         # ... (这里保留你原本的 Model A 预训练加载逻辑和 loss 配置) ...
         criterion = get_loss(
@@ -492,7 +494,7 @@ def main():
         
         optimizer = torch.optim.Adam(model_A.parameters(), lr=1e-4, weight_decay=5e-5)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.5)
-        early_stopping = EarlyStopping(patience=15, delta=0.001, save_dir=save_dir)
+        early_stopping = EarlyStopping(patience=10, delta=0.001, save_dir=save_dir)
 
         train_loss_list, val_loss_list = [], []
 
@@ -524,13 +526,35 @@ def main():
         print("="*50)
         
         # 💡 1. 实例化并绝对冻结 Model A
-        model_A = get_model(num_classes=1, input_dim=real_input_dim, dropout_p=0).to(device)
+        model_A = get_model(num_classes=1, input_dim=real_input_dim, dropout_p=0.2).to(device)
         if os.path.exists(MODEL_A_CKPT):
-            model_A.load_state_dict(torch.load(MODEL_A_CKPT, map_location=device))
-            print(f"[*] ✅ 成功加载 Model A 管道先验权重!")
-        else:
-            print(f"[!] ❌ 找不到 Model A 权重，请先完成 Stage A 训练！路径: {MODEL_A_CKPT}")
-            return
+            # 1. 先把权重读取到内存字典中
+            checkpoint = torch.load(MODEL_A_CKPT, map_location=device)
+            new_state_dict = {}
+            
+            # 2. 遍历字典，翻译 Key 的名字
+            for k, v in checkpoint.items():
+                # 替换 Encoder 名称
+                if 'enc1.' in k: k = k.replace('enc1.', 'enc.0.')
+                elif 'enc2.' in k: k = k.replace('enc2.', 'enc.1.')
+                elif 'enc3.' in k: k = k.replace('enc3.', 'enc.2.')
+                elif 'enc4.' in k: k = k.replace('enc4.', 'enc.3.')
+                elif 'enc5.' in k: k = k.replace('enc5.', 'enc.4.')
+                
+                # 替换 Decoder 名称
+                # 注意：我们在 __init__ 中是用 range(4, -1, -1) 倒序生成 dec 的
+                # 所以原来的 dec5 变成了现在的 dec.0，dec4 变成了 dec.1，以此类推
+                elif 'dec5.' in k: k = k.replace('dec5.', 'dec.0.')
+                elif 'dec4.' in k: k = k.replace('dec4.', 'dec.1.')
+                elif 'dec3.' in k: k = k.replace('dec3.', 'dec.2.')
+                elif 'dec2.' in k: k = k.replace('dec2.', 'dec.3.')
+                elif 'dec1.' in k: k = k.replace('dec1.', 'dec.4.')
+                
+                new_state_dict[k] = v
+                
+            # 3. 将翻译好的新字典喂给模型
+            model_A.load_state_dict(new_state_dict)
+            print(f"[*] ✅ 成功通过字典映射加载 Model A 管道先验权重!")
             
         model_A.eval() # 锁定 Dropout 和 BatchNorm
         for param in model_A.parameters():
@@ -538,7 +562,7 @@ def main():
             
         # 💡 2. 实例化 Model B (核心：输入维度 + 1，因为拼接了 P_tube)
         # 注意：这里你可以把 dropout 调高一点，防止在小规模正样本上过拟合
-        model_B = get_model(num_classes=1, input_dim=real_input_dim + 1, dropout_p=0.0).to(device)
+        model_B = get_model(num_classes=1, input_dim=real_input_dim + 1, dropout_p=0.1, blocks=[1,1]).to(device)
         print(f"[*] 🚀 Model B 已初始化，输入特征维度已自动扩展至: {real_input_dim + 1}")
 
         # 💡 3. Model B 专属的 loss
@@ -548,9 +572,9 @@ def main():
                             w_safety=0.0,
                             w_conn=0.0,
                             w_cost=0.0,
-                            alpha=0.6,
-                            gamma=2,
-                            delta_s=0.6,
+                            alpha=0.9,
+                            gamma=1.5,
+                            delta_s=0.7,
                             delta_d=0.2,
                             r_corridor=0.05,
                             r_local=0.06,
@@ -567,7 +591,7 @@ def main():
         
         optimizer_B = torch.optim.Adam(model_B.parameters(), lr=1e-4, weight_decay=5e-5)
         scheduler_B = torch.optim.lr_scheduler.StepLR(optimizer_B, step_size=15, gamma=0.5)
-        early_stopping_B = EarlyStopping(patience=15, delta=0.001, save_dir=save_dir)
+        early_stopping_B = EarlyStopping(patience=10, delta=0.001, save_dir=save_dir)
 
         train_loss_list, val_loss_list = [], []
 

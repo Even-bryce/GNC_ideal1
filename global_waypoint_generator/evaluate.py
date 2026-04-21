@@ -91,6 +91,13 @@ def visualize_result(xyz, target, pred_prob, start_pt, goal_pt, gt_mid_wps, pred
     gt_points = xyz[gt_mask]
     gt_colors = target[gt_mask]
 
+    print("-" * 40)
+    print(f"📊 [可视化统计] 当前切片点数概况:")
+    print(f"   ➤ 全局总点数: {len(xyz)}")
+    print(f"   ➤ GT 标签 > 0.5 的点数: {len(gt_points)}")
+    print(f"   ➤ 预测分数 > {threshold} 的点数: {len(pred_points)}")
+    print("-" * 40)
+
     fig = plt.figure(figsize=(16, 8))
     scatter_kwargs = {
         'cmap': 'jet', 's': 20, 'vmin': 0.0, 'vmax': 1.0, 
@@ -409,7 +416,7 @@ def evaluate_A(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02
                 visualize_result(
                     xyz_vis, target_vis, prob_vis, 
                     start_pt, goal_pt, gt_mid_waypoints, pred_mid_waypoints, true_mid_wps,
-                    threshold=0.5
+                    threshold=0.4
                 )
 
                 cmd = input("Press Enter for next sample, or 'n' to stop: ")
@@ -487,7 +494,7 @@ def evaluate_B(model_B_path, model_A_path, data_dir, map_dim, cluster_eps=0.02, 
     model_A.eval()
 
     print("加载 Model B (航路点精测网络)...")
-    model_B = get_model(num_classes=1, input_dim=real_input_dim + 1).to(device) # 💡 输入维度 +1
+    model_B = get_model(num_classes=1, input_dim=real_input_dim + 1, blocks=[1,1]).to(device) # 💡 输入维度 +1
     model_B.load_state_dict(torch.load(model_B_path, map_location=device))
     model_B.eval()
 
@@ -848,7 +855,6 @@ if __name__ == "__main__":
 
     # evaluate_B(
     #     model_B_path=B_CKPT_PATH,
-
     #     model_A_path=A_CKPT_PATH,
     #     data_dir=DATA_DIR, 
     #     map_dim=MAP_DIM,
