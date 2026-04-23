@@ -1,15 +1,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 import os
 import random
 import math
 import time
 from mpl_toolkits.mplot3d import Axes3D
 from env_generator_for_data import env_generator, env_generator_cluster
+from res_show_for_data import plot_tree_and_path, plot_tree_and_path_and_waypoints
 from scipy.spatial import KDTree
 from sklearn.cluster import DBSCAN
-from scipy.stats import qmc
 
 # 定义 Node 类，用于表示树中的每个节点
 class Node:
@@ -168,7 +167,6 @@ class RRTStar:
         随机采样一个点
         :return: 随机点的坐标 [x, y, z]
         """
-        # rnd_gen = random.Random()
         rnd = [random.uniform(self.min_rand[0], self.max_rand[0]),
                random.uniform(self.min_rand[1], self.max_rand[1]),
                random.uniform(self.min_rand[2], self.max_rand[2])]
@@ -180,9 +178,6 @@ class RRTStar:
         :param goal_sample_rate: 采样目标点的概率（0-100）
         :return: 采样点的坐标 [x, y, z]
         """
-        # rnd_gen2 = random.Random()    
-        # if rnd_gen2.randint(0, 99) > goal_sample_rate:
-        #     return self.sample_free()    
         if random.uniform(0, 99) > goal_sample_rate:
             return self.sample_free()
         else:
@@ -900,19 +895,11 @@ def plot_sample_scores(xyz, labels, best_path, waypoints, extracted_wps, map_dim
     """
     可视化生成的样本点及其得分，同时对比真值航路点与聚类提取的航路点
     """
-
-    if labels.ndim == 2 and labels.shape[1] == 2:
-        # 通道 0 是 Tube，通道 1 是 Waypoint
-        # 这里演示融合显示，或者你可以只看 Waypoint：vis_scores = labels[:, 1]
-        vis_scores = np.max(labels, axis=1)
-    else:
-        vis_scores = labels
-
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection='3d')
 
     # 1. 绘制采样点 (散点图)
-    scores = vis_scores.flatten()
+    scores = labels.flatten()
     p = ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], 
                    c=scores, cmap='jet', s=scores*50 + 2, alpha=0.6, label='Sampled Points')
     fig.colorbar(p, ax=ax, label='Score (Label)')
@@ -942,72 +929,6 @@ def plot_sample_scores(xyz, labels, best_path, waypoints, extracted_wps, map_dim
     ax.set_title('Score Distribution & Waypoint Extraction Verification')
     ax.legend()
     plt.show()
-
-def analyze_feature_distribution(points, labels, save_path=None):
-    """
-    分析并可视化正负样本的障碍物特征分布 (f_align, f_stress)
-    points: 终极 7 维特征张量 [N, 7]
-    labels: 点云打分标签 [N, 1]
-    save_path: 统计图像保存的路径 (可选)
-    """
-    scores = labels[:, 0]
-    f_align = points[:, 5]  # Index 5 是战术偏转角
-    f_stress = points[:, 6] # Index 6 是生存压迫感
-
-    # 筛选正负样本
-    mask_pos = scores > 0.7
-    mask_neg = scores < 0.5
-
-    align_pos, align_neg = f_align[mask_pos], f_align[mask_neg]
-    stress_pos, stress_neg = f_stress[mask_pos], f_stress[mask_neg]
-
-    # ==========================================
-    # 1. 终端打印统计信息
-    # ==========================================
-    print("\n" + "="*40)
-    print(" 🎯 特征分布统计分析 (Feature Analysis)")
-    print("="*40)
-    print(f"[正样本 / 最优路径] 得分 > 0.7 的点数: {len(align_pos)}")
-    if len(align_pos) > 0:
-        print(f"  -> f_align  均值: {align_pos.mean():.4f} | 标准差: {align_pos.std():.4f}")
-        print(f"  -> f_stress 均值: {stress_pos.mean():.4f} | 标准差: {stress_pos.std():.4f}")
-
-    print(f"\n[负样本 / 背景墙壁] 得分 < 0.5 的点数: {len(align_neg)}")
-    if len(align_neg) > 0:
-        print(f"  -> f_align  均值: {align_neg.mean():.4f} | 标准差: {align_neg.std():.4f}")
-        print(f"  -> f_stress 均值: {stress_neg.mean():.4f} | 标准差: {stress_neg.std():.4f}")
-    print("="*40 + "\n")
-
-    # ==========================================
-    # 2. 绘制核密度分布对比图 (KDE Plot)
-    # ==========================================
-    if save_path and len(align_pos) > 0 and len(align_neg) > 0:
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        sns.set_theme(style="whitegrid")
-
-        # 绘制 f_align 分布
-        sns.kdeplot(align_pos, fill=True, color="green", label="Pos (Score > 0.7)", ax=axes[0])
-        sns.kdeplot(align_neg, fill=True, color="red", label="Neg (Score < 0.5)", ax=axes[0])
-        axes[0].set_title("f_align (Tactical Angle) Distribution")
-        axes[0].set_xlabel("Cosine Value [-1, 1]")
-        axes[0].set_xlim(-1.2, 1.2)
-        axes[0].legend()
-
-        # 绘制 f_stress 分布
-        sns.kdeplot(stress_pos, fill=True, color="green", label="Pos (Score > 0.7)", ax=axes[1])
-        sns.kdeplot(stress_neg, fill=True, color="red", label="Neg (Score < 0.5)", ax=axes[1])
-        axes[1].set_title("f_stress (Survival Stress) Distribution")
-        axes[1].set_xlabel("Stress Value [0, 1)")
-        axes[1].set_xlim(-0.1, 1.1)
-        axes[1].legend()
-
-        plt.tight_layout()
-        
-        # 保存图像
-        img_path = file_path.replace('.npz', '_dist.png') if isinstance(save_path, bool) else save_path
-        plt.savefig(img_path, dpi=150)
-        plt.close()
-        print(f"[Visualizing] 统计分布图已保存至: {img_path}")
 
 def save_sample(
     env_map,
@@ -1185,6 +1106,8 @@ def save_sample(
     if visualize:
         print(f"[Visualizing] Plotting scores for {file_path}...")
         plot_sample_scores(xyz, labels, best_path, waypoints, env_map["map_dim"])
+    
+
 
 def save_sample2(
     env_map,
@@ -1579,15 +1502,7 @@ def save_sample3(
     # ==========================================
     # 2. 批量采样 (One-Pass)
     # ==========================================
-    # 随机撒点
-    sampler = qmc.Sobol(d=3, scramble=True) 
-    
-    # 最好使用 2 的幂次方来最大化均匀性，不过 N_attempts=4096 刚好是 2^12，非常完美
-    sobol_norm = sampler.random_base2(m=int(np.log2(N_attempts))) 
-    
-    # 将 [0, 1] 的均匀点映射到真实的物理地图尺度上
-    candidates = xyz_min + sobol_norm * (xyz_max - xyz_min)
-
+    candidates = np.random.uniform(xyz_min, xyz_max, size=(N_attempts, 3))
     valid_pts = []
     
     for p in candidates:
@@ -1711,565 +1626,8 @@ def save_sample3(
         # 传递给统一的绘图函数
         plot_sample_scores(xyz, labels, best_path, waypoints, extracted_wps_physical, env_map["map_dim"])
 
-def save_sample4(
-    env_map,
-    file_path,
-    best_path,      # [K, 3] 真实最优路径的一系列点 (密集)
-    waypoints,      # [M, 3] 真实路径的关键航路点 (稀疏，包含起点和终点)
-    N_attempts=4096,
-    alpha=1.0,      # 路径基础分权重
-    sigma1=0.05,    # 路段宽度 (此时代表占地图比例，如 0.05 代表 5% 的地图跨度)
-    sigma2=0.02,    # 关键点精度 (同上)
-    eps=1e-8,
-    visualize=False
-):
-    """
-    生成并保存一个训练样本 (.npz) - 异向高斯自适应版本
-    针对 Z 轴跨度远小于 XY 轴的情况，自动生成扁平的椭球状高斯标签。
-    """
-    
-    # ==========================================
-    # 内部辅助函数
-    # ==========================================
-    def extract_waypoints(points, scores, eps=0.15, peak_radius=0.15, z_weight=1.0):
-        if len(points) == 0:
-            return np.empty((0, 3))
 
-        # ================================
-        # ⭐ Step 0: Z方向加权（拉伸Z轴距离，切断上下层连通）
-        # ================================
-        points_scaled = points.copy()
-        points_scaled[:, 2] *= z_weight
-
-        # ================================
-        # Step 1: 局部极大值 (寻找峰值候选点)
-        # ================================
-        tree = KDTree(points_scaled)
-        peaks = []
-        peak_scores = []
-
-        for i, p in enumerate(points_scaled):
-            # 找周围半径内的邻居
-            idx = tree.query_ball_point(p, r=peak_radius)
-
-            is_peak = True
-            for j in idx:
-                # 如果周围有比自己得分严格更高的点，那自己就不是局部的绝对波峰
-                if scores[j] > scores[i]:
-                    is_peak = False
-                    break
-
-            if is_peak:
-                peaks.append(points[i])  # ⚠️ 记录原始坐标
-                peak_scores.append(scores[i])
-
-        if len(peaks) == 0:
-            return np.empty((0, 3))
-
-        peaks = np.array(peaks)
-        peak_scores = np.array(peak_scores)
-
-        # ================================
-        # ⭐ Step 2: DBSCAN 聚类（融合相近的局部极值点）
-        # ================================
-        peaks_scaled = peaks.copy()
-        peaks_scaled[:, 2] *= z_weight
-
-        clustering = DBSCAN(eps=eps, min_samples=1).fit(peaks_scaled)
-        labels = clustering.labels_
-
-        waypoints = []
-
-        for label in set(labels):
-            if label == -1:
-                continue
-
-            mask = (labels == label)
-            cluster_points = peaks[mask]
-            cluster_scores = peak_scores[mask]
-
-            # 在同属于一个波峰簇的候选点中，选得分最高的那一个作为最终航路点
-            best_idx = np.argmax(cluster_scores)
-            waypoints.append(cluster_points[best_idx])
-
-        return np.array(waypoints)
-
-    def check_collision(point, obstacles):
-        px, py, pz = point
-        for (ox, oy, zmin, zmax, r_crash, _) in obstacles:
-            if zmin <= pz <= zmax:
-                if (px - ox)**2 + (py - oy)**2 <= r_crash**2:
-                    return True
-        return False
-
-    def get_min_distance_to_obstacles(point, obstacles):
-        px, py, pz = point
-        min_dist = float('inf')
-        for (ox, oy, zmin, zmax, r_crash, _) in obstacles:
-            d_hor = np.sqrt((px - ox)**2 + (py - oy)**2) - r_crash
-            if pz > zmax: d_ver = pz - zmax
-            elif pz < zmin: d_ver = zmin - pz
-            else: d_ver = 0.0
-
-            if d_hor > 0 and d_ver == 0: dist = d_hor
-            elif d_hor <= 0 and d_ver > 0: dist = d_ver
-            elif d_hor > 0 and d_ver > 0: dist = np.sqrt(d_hor**2 + d_ver**2)
-            else: dist = 0.0 
-            
-            if dist < min_dist: min_dist = dist
-        return min_dist
-
-    def get_nearest_obstacle_normal(point, obstacles):
-        px, py, pz = point
-        min_dist = float('inf')
-        best_normal = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-
-        for (ox, oy, zmin, zmax, r_crash, _) in obstacles:
-            dx = px - ox
-            dy = py - oy
-            d_xy = np.sqrt(dx**2 + dy**2) + eps 
-            
-            ux, uy = dx / d_xy, dy / d_xy
-            dist_xy = d_xy - r_crash
-            
-            dist_z, vz = 0.0, 0.0
-            if pz > zmax:
-                dist_z, vz = pz - zmax, 1.0
-            elif pz < zmin:
-                dist_z, vz = zmin - pz, -1.0
-
-            curr_dist = float('inf')
-            if dist_xy > 0 and dist_z <= 0:   
-                curr_dist = dist_xy
-            elif dist_xy <= 0 and dist_z > 0: 
-                curr_dist = dist_z
-            elif dist_xy > 0 and dist_z > 0:  
-                curr_dist = np.sqrt(dist_xy**2 + dist_z**2)
-            else: 
-                curr_dist = 0.0
-            
-            if curr_dist < min_dist:
-                min_dist = curr_dist
-                nx, ny, nz = 0.0, 0.0, 0.0
-                
-                if dist_xy > 0 and dist_z <= 0:   
-                    nx, ny, nz = ux, uy, 0.0
-                elif dist_xy <= 0 and dist_z > 0: 
-                    nx, ny, nz = 0.0, 0.0, vz
-                elif dist_xy > 0 and dist_z > 0:  
-                    vx, vy, vz_vec = dist_xy * ux, dist_xy * uy, dist_z * vz
-                    norm = np.sqrt(vx**2 + vy**2 + vz_vec**2) + eps
-                    nx, ny, nz = vx/norm, vy/norm, vz_vec/norm
-                else:
-                    nx, ny, nz = ux, uy, 0.0
-                    
-                best_normal = np.array([nx, ny, nz], dtype=np.float32)
-
-        return best_normal
-
-    def point_to_segment_distance(P, A, B):
-        AB = B - A
-        AP = P - A
-        ab_sq = np.dot(AB, AB) + eps
-        t = np.dot(AP, AB) / ab_sq
-        t = np.clip(t, 0.0, 1.0)
-        Proj = A + t[:, np.newaxis] * AB
-        return np.linalg.norm(P - Proj, axis=1)
-    
-    def get_cylinder_repulsion_vectorized(xyz_norm, obstacles_norm, R_safe_norm):
-        """
-        使用矩阵掩码，并行计算点云在圆柱体环境下的合成指数斥力场。
-        【重要提示】: xyz_norm, obstacles_norm, R_safe_norm 必须位于同一尺度空间！
-        """
-        N = xyz_norm.shape[0]
-        total_F_obs = np.zeros((N, 3), dtype=np.float32)
-        min_dist_global = np.full(N, np.inf, dtype=np.float32)
-        eps = 1e-6
-
-        # 算力截断边界：超过 3 倍安全半径的点，斥力已趋近于 0，直接放弃计算
-        R_percept = 3.0 * R_safe_norm
-
-        x = xyz_norm[:, 0]
-        y = xyz_norm[:, 1]
-        z = xyz_norm[:, 2]
-
-        for obs in obstacles_norm:
-            xc, yc = obs['xc'], obs['yc']
-            z_bottom, z_top = obs['z_bottom'], obs['z_top']
-            R = obs['R']
-
-            # 1. 计算水平相对坐标与径向距离
-            dx = x - xc
-            dy = y - yc
-            r = np.sqrt(dx**2 + dy**2) + eps
-
-            # 2. 【核心算力优化】：截断掩码
-            # 注意高度范围的判断也使用了 z_bottom 和 z_top
-            mask_active = (r <= R_percept + R) & (z >= z_bottom - R_percept) & (z <= z_top + R_percept)
-            
-            if not np.any(mask_active):
-                continue  # 这个圆柱体附近没有点，直接跳过，省下大量算力！
-
-            # 提取被激活点的子集，后续所有操作只在这个极小的子集上进行
-            x_act, y_act, z_act = x[mask_active], y[mask_active], z[mask_active]
-            dx_act, dy_act, r_act = dx[mask_active], dy[mask_active], r[mask_active]
-            
-            N_act = np.sum(mask_active)
-            d_act = np.zeros(N_act, dtype=np.float32)
-            v_obs_act = np.zeros((N_act, 3), dtype=np.float32)
-
-            # ==========================================
-            # 区域 1: 侧面绕行区 (Side Region)
-            # ==========================================
-            mask_side = (z_act >= z_bottom) & (z_act <= z_top) & (r_act > R)
-            if np.any(mask_side):
-                d_act[mask_side] = r_act[mask_side] - R
-                v_obs_act[mask_side, 0] = dx_act[mask_side] / r_act[mask_side]
-                v_obs_act[mask_side, 1] = dy_act[mask_side] / r_act[mask_side]
-                v_obs_act[mask_side, 2] = 0.0
-
-            # ==========================================
-            # 区域 2: 正上方平飞区 (Top Region)
-            # ==========================================
-            mask_top = (z_act > z_top) & (r_act <= R)
-            if np.any(mask_top):
-                d_act[mask_top] = z_act[mask_top] - z_top
-                v_obs_act[mask_top, 0] = 0.0
-                v_obs_act[mask_top, 1] = 0.0
-                v_obs_act[mask_top, 2] = 1.0
-
-            # ==========================================
-            # 区域 3: 顶部越障爬升区 (Top Edge Region)
-            # ==========================================
-            mask_edge_top = (z_act > z_top) & (r_act > R)
-            if np.any(mask_edge_top):
-                dr = r_act[mask_edge_top] - R
-                dz = z_act[mask_edge_top] - z_top
-                dist_edge = np.sqrt(dr**2 + dz**2) + eps
-                
-                d_act[mask_edge_top] = dist_edge
-                v_obs_act[mask_edge_top, 0] = (dr / dist_edge) * (dx_act[mask_edge_top] / r_act[mask_edge_top])
-                v_obs_act[mask_edge_top, 1] = (dr / dist_edge) * (dy_act[mask_edge_top] / r_act[mask_edge_top])
-                v_obs_act[mask_edge_top, 2] = dz / dist_edge
-
-            # ==========================================
-            # 区域 4: 底部边缘与正下方 (Bottom & Bottom Edge)
-            # ==========================================
-            mask_bottom = (z_act < z_bottom) & (r_act <= R)
-            if np.any(mask_bottom):
-                d_act[mask_bottom] = z_bottom - z_act[mask_bottom]
-                v_obs_act[mask_bottom, 0] = 0.0
-                v_obs_act[mask_bottom, 1] = 0.0
-                v_obs_act[mask_bottom, 2] = -1.0 # 向下排斥
-
-            mask_edge_bottom = (z_act < z_bottom) & (r_act > R)
-            if np.any(mask_edge_bottom):
-                dr = r_act[mask_edge_bottom] - R
-                dz = z_bottom - z_act[mask_edge_bottom]
-                dist_edge = np.sqrt(dr**2 + dz**2) + eps
-                
-                d_act[mask_edge_bottom] = dist_edge
-                v_obs_act[mask_edge_bottom, 0] = (dr / dist_edge) * (dx_act[mask_edge_bottom] / r_act[mask_edge_bottom])
-                v_obs_act[mask_edge_bottom, 1] = (dr / dist_edge) * (dy_act[mask_edge_bottom] / r_act[mask_edge_bottom])
-                v_obs_act[mask_edge_bottom, 2] = -dz / dist_edge # 向下向外排斥
-
-            # ==========================================
-            # 兜底区域: 内部穿模区 (防崩溃保命机制)
-            # ==========================================
-            mask_inside = (z_act >= z_bottom) & (z_act <= z_top) & (r_act <= R)
-            if np.any(mask_inside):
-                d_act[mask_inside] = 0.0  # 距离为0，触发最大斥力 1.0
-                
-                # 在内部时，提供一个斜向上向外的逃生推力
-                vec_x = dx_act[mask_inside] / r_act[mask_inside]
-                vec_y = dy_act[mask_inside] / r_act[mask_inside]
-                vec_z = 1.0 
-                
-                norm_inside = np.sqrt(vec_x**2 + vec_y**2 + vec_z**2) + eps
-                v_obs_act[mask_inside, 0] = vec_x / norm_inside
-                v_obs_act[mask_inside, 1] = vec_y / norm_inside
-                v_obs_act[mask_inside, 2] = vec_z / norm_inside
-
-            # ==========================================
-            # 3. 施加指数衰减并拼装合力
-            # ==========================================
-            # 计算激活点的斥力幅值
-            magnitude = np.exp(-d_act / R_safe_norm)
-            
-            # 方向向量乘以幅值
-            F_obs_i = v_obs_act * magnitude[:, None]
-
-            # 将局部计算结果准确加回到全局总斥力张量中
-            total_F_obs[mask_active] += F_obs_i
-            min_dist_global[mask_active] = np.minimum(min_dist_global[mask_active], d_act)
-
-        return total_F_obs, min_dist_global
-            
-
-    def normalize_obstacles(raw_obstacle_list, center, scale):
-        """
-        将地图生成的原始障碍物列表，映射到与 xyz_norm 完全一致的归一化空间。
-        
-        参数:
-        raw_obstacle_list: list of tuples (x, y, zmin, zmax, r_crash, r_risk)
-        center: np.array([cx, cy, cz]) 点云归一化时使用的中心点
-        scale: float 点云归一化时使用的缩放系数
-        """
-        obstacles_norm = []
-        
-        for obs in raw_obstacle_list:
-            x, y, zmin, zmax, r_crash, r_risk = obs
-            
-            # 1. 坐标平移 + 缩放 (Shift + Scale)
-            xc_norm = (x - center[0]) / scale
-            yc_norm = (y - center[1]) / scale
-            
-            # 提取真实的底部和顶部 Z 坐标 (解决归一化后地面不再是 0 的问题)
-            z_bottom_norm = (zmin - center[2]) / scale
-            z_top_norm = (zmax - center[2]) / scale
-            
-            # 2. 几何尺寸仅缩放 (Only Scale)
-            # 尺寸是不受空间平移影响的，只受缩放比例影响
-            # 这里我们选用 r_crash 作为物理墙壁的绝对边界 R
-            R_norm = r_crash / scale
-            
-            obstacles_norm.append({
-                'xc': xc_norm,
-                'yc': yc_norm,
-                'z_bottom': z_bottom_norm,
-                'z_top': z_top_norm,
-                'R': R_norm
-            })
-            
-        return obstacles_norm
-
-    # ==========================================
-    # 1. 预处理输入数据
-    # ==========================================
-    path_arr = np.asarray(best_path, dtype=np.float32)   
-    wp_arr   = np.asarray(waypoints, dtype=np.float32)   
-    
-    S = wp_arr[0]
-    G = wp_arr[-1]
-    
-    Lx, Ly, Lz = env_map["map_dim"]
-    xyz_min = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-    xyz_max = np.array([Lx, Ly, Lz], dtype=np.float32)
-    obstacles = env_map["obstacles"]
-    
-    center = 0.5 * (xyz_min + xyz_max)
-    scale = max(Lx, Ly, Lz)
-
-    # ==========================================
-    # 2. 批量采样 (One-Pass)
-    # ==========================================
-    # 随机撒点
-    sampler = qmc.Sobol(d=3, scramble=True) 
-    
-    # 最好使用 2 的幂次方来最大化均匀性，不过 N_attempts=4096 刚好是 2^12，非常完美
-    sobol_norm = sampler.random_base2(m=int(np.log2(N_attempts))) 
-    
-    # 将 [0, 1] 的均匀点映射到真实的物理地图尺度上
-    candidates = xyz_min + sobol_norm * (xyz_max - xyz_min)
-
-    valid_pts = []
-    
-    for p in candidates:
-        if not check_collision(p, obstacles):
-            valid_pts.append(p)
-
-    if len(valid_pts) == 0:
-        pts = wp_arr.copy()
-    else:
-        pts = np.asarray(valid_pts, dtype=np.float32)
-
-    # ==========================================
-    # 3. 组合最终点集
-    # ==========================================
-    xyz = np.vstack([S[None], G[None], pts]) 
-    N_real = xyz.shape[0]
-
-    # ==========================================
-    # 4. 构建输入特征 (Input Features) - 终极物理几何解耦版
-    # ==========================================
-    # xyz_norm = (xyz - center) / (scale + eps)
-    # obstacles_norm = normalize_obstacles(obstacles, center, scale)
-    
-    # # ------------------------------------------
-    # # [升级项] 全局进度张力 - 等势面投影设计 (Equipotential Surface)
-    # # ------------------------------------------
-    # # 1. 计算主任务轴向量 (从 S 到 G)
-    # vec_task = G - S  # shape: (3,)
-    # L_task_sq = np.sum(vec_task**2) + eps  # 任务轴长度的平方
-    
-    # # 2. 计算每个点相对于起点的向量
-    # vec_SP = xyz - S[None]  # shape: (N, 3)
-    
-    # # 3. 计算等势面进度 (点积求投影)
-    # # 矩阵按元素相乘后在轴 1 求和，得到每个点的投影进度值
-    # f_goal_raw = np.sum(vec_SP * vec_task[None], axis=1) / L_task_sq
-    
-    # # 4. 截断保护 (保证特征范围稳定)
-    # # 截断到 [0, 1] 之间，防止飞行器绕到起点背后或飞过终点导致特征溢出
-    # f_goal = np.clip(f_goal_raw, 0.0, 1.0)
-    
-    # # 5. 反向进度 (适配原有 Loss 逻辑，保证 f_start + f_goal = 1)
-    # f_start = 1.0 - f_goal
-    xyz_norm = (xyz - center) / (scale + eps)
-    obstacles_norm = normalize_obstacles(obstacles, center, scale)
-    
-    # ------------------------------------------
-    # [回滚项] 宏观大区定位 - 欧氏距离比值 (Distance Ratio)
-    # ------------------------------------------
-    # 1. 计算每个点到起点 S 和终点 G 的绝对欧氏距离
-    # xyz shape: (N, 3), S[None] shape: (1, 3)
-    d_s = np.linalg.norm(xyz - S[None], axis=1)
-    d_g = np.linalg.norm(xyz - G[None], axis=1)
-    
-    # 2. 计算分母 (防止除零异常)
-    denom = d_s + d_g + eps
-    
-    # 3. 提取特征：距离比值
-    # f_start: 靠近起点时 d_s 极小，d_g/denom 接近 1.0；靠近终点时接近 0.0
-    f_start = d_g / denom  
-    
-    # f_goal: 靠近起点时 d_s 极小，d_s/denom 接近 0.0；靠近终点时接近 1.0
-    f_goal  = d_s / denom
-
-    # ==========================================
-    # 超参数定义
-    # ==========================================
-    R_safe = 0.15 # 安全衰减半径
-    w_obs = 1.5   # 障碍物干扰权重
-
-    # 1. 并行计算环境总斥力向量 (N, 3) (假定使用了上文的 vectorized 函数)
-    F_obs_total, min_dist_norm = get_cylinder_repulsion_vectorized(xyz_norm, obstacles_norm, R_safe)
-
-    # ==========================================
-    # 🌟 2. 全新设计的 f_stress (净空生存压迫感)
-    # ==========================================
-    # 新版 (长尾柯西)：完美保留负样本的离散方差
-    f_stress = 1.0 / (1.0 + (min_dist_norm / R_safe)**2)
-
-    # f_stress_raw = np.linalg.norm(F_obs_total, axis=1)
-    # f_stress = f_stress_raw / (1.0 + f_stress_raw)  # 严格压缩到 [0, 1)
-    
-    # 补丁：把没有遇到障碍物的点设为 0 (这一步依然保留，防 inf 越界)
-    f_stress[min_dist_norm == np.inf] = 0.0
-    
-
-    # 3. 计算恒定目标引力 (方向向量, 模长为1)
-    vec_goal = G[None] - xyz
-    dist_goal = np.linalg.norm(vec_goal, axis=1, keepdims=True) + eps
-    dir_goal = vec_goal / dist_goal
-    F_goal = 1.0 * dir_goal  # 引力幅值永远为 1.0
-
-    # 4. 合成物理合力
-    F_total = F_goal + w_obs * F_obs_total
-
-    # 5. 计算合力的单位向量
-    dist_total = np.linalg.norm(F_total, axis=1, keepdims=True) + eps
-    dir_total = F_total / dist_total
-
-    # 6. 提取特征：战术偏转角 f_align
-    f_align = np.sum(dir_total * dir_goal, axis=1)  
-
-    # ==========================================
-    # 组装终极 7 维特征张量
-    # ==========================================
-    points = np.stack([
-        xyz_norm[:, 0], xyz_norm[:, 1], xyz_norm[:, 2],  # Index 0, 1, 2
-        f_start, f_goal,                                 # Index 3, 4 (等势面进度)
-        f_align,                                         # Index 5 (战术偏转)
-        f_stress                                         # Index 6 (生存压迫感)
-    ], axis=1).astype(np.float32)
-
-    # ==========================================
-    # 5. 标签计算 (Label Generation) - ⭐核心修复：异向高斯
-    # ==========================================
-    labels = np.zeros((N_real, 1), dtype=np.float32)
-    
-    # 构建坐标缩放比例尺 [Lx, Ly, Lz]
-    # 通过将点云除以这个比例尺，物理空间被拉伸成了 1x1x1 的标准魔方
-    dim_scale = np.array([Lx, Ly, Lz], dtype=np.float32) + eps
-    
-    # 计算用于打标签的“变形坐标”
-    xyz_ratio = xyz / dim_scale
-    wp_ratio = wp_arr / dim_scale
-    path_ratio = path_arr / dim_scale
-    
-    # --- 计算 d_point (航路点) ---
-    mid_wps_ratio = wp_ratio[1:-1]
-    if len(mid_wps_ratio) > 0:
-        # 在变形空间里算距离
-        dists_to_mid_wps = np.linalg.norm(xyz_ratio[:, None, :] - mid_wps_ratio[None, :, :], axis=2)
-        d_point_ratio = np.min(dists_to_mid_wps, axis=1)
-        # 注意：这里直接用 d_point_ratio，不需要再除以 scale 了
-        y_point = 1.0 * np.exp(- (d_point_ratio ** 2) / (2 * sigma2**2))
-    else:
-        y_point = np.zeros(N_real, dtype=np.float32)
-
-    # --- 计算 d_line (管状路径) ---
-    d_line_ratio = np.full(N_real, float('inf'), dtype=np.float32)
-    for k in range(len(path_ratio) - 1):
-        A_ratio = path_ratio[k]
-        B_ratio = path_ratio[k+1]
-        # 在变形空间里算线段距离
-        d_segment = point_to_segment_distance(xyz_ratio, A_ratio, B_ratio)
-        d_line_ratio = np.minimum(d_line_ratio, d_segment)
-
-    # 同样，直接使用变形空间算出的比例距离
-    y_line = alpha * np.exp(- (d_line_ratio ** 2) / (2 * sigma1**2))
-    
-    # 融合标签
-    labels[:, 0] = np.maximum(y_line, y_point)
-    labels[0, 0] = 1.0 
-    labels[1, 0] = 1.0
-
-    # ==========================================
-    # 6. 保存
-    # ==========================================
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    np.savez(file_path, points=points, labels=labels)
-    # 将真实航路点也保存进去，方便后续可视化和测试
-    np.savez(file_path, points=points, labels=labels, waypoints=wp_arr)
-    
-    if visualize:
-        print(f"[Visualizing] Plotting scores and testing extraction for {file_path}...")
-
-        dist_img_path = file_path.replace('.npz', '_feature_dist.png')
-        analyze_feature_distribution(points, labels, save_path=dist_img_path)
-        
-        # 为了加速计算并去除底噪，我们只提取得分大于阈值的点进行聚类
-        mask = labels[:, 0] > 0.7
-        high_score_xyz = xyz[mask]
-        high_score_labels = labels[mask, 0]
-        
-        if len(high_score_xyz) > 0:
-            # 💡 核心：把坐标转换到“各向异性比例空间”里去聚类，和标签的生成域保持一致！
-            high_score_ratio = high_score_xyz / dim_scale
-            
-            # 调用聚类算法
-            extracted_wps_ratio = extract_waypoints(
-                points=high_score_ratio, 
-                scores=high_score_labels, 
-                eps=0.15,        
-                peak_radius=0.15,        # 如果调小了的话就航路点就比较多
-                z_weight=1.0             # 已经在 ratio 空间里压扁了 Z 轴，这里无需再额外加权
-            )
-            
-            # 将聚类出来的结果从比例空间还原回真实物理坐标
-            if len(extracted_wps_ratio) > 0:
-                extracted_wps_physical = extracted_wps_ratio * dim_scale
-            else:
-                extracted_wps_physical = np.empty((0, 3))
-        else:
-            extracted_wps_physical = np.empty((0, 3))
-            
-        # 传递给统一的绘图函数
-        plot_sample_scores(xyz, labels, best_path, waypoints, extracted_wps_physical, env_map["map_dim"])
-
-def save_sample5(
+def save_sample6(
     env_map,
     file_path,
     best_path,      # [K, 3] 真实最优路径的一系列点 (密集)
@@ -2454,15 +1812,7 @@ def save_sample5(
     # ==========================================
     # 2. 批量采样 (One-Pass)
     # ==========================================
-    # 随机撒点
-    sampler = qmc.Sobol(d=3, scramble=True) 
-    
-    # 最好使用 2 的幂次方来最大化均匀性，不过 N_attempts=4096 刚好是 2^12，非常完美
-    sobol_norm = sampler.random_base2(m=int(np.log2(N_attempts))) 
-    
-    # 将 [0, 1] 的均匀点映射到真实的物理地图尺度上
-    candidates = xyz_min + sobol_norm * (xyz_max - xyz_min)
-
+    candidates = np.random.uniform(xyz_min, xyz_max, size=(N_attempts, 3))
     valid_pts = []
     
     for p in candidates:
@@ -2505,79 +1855,80 @@ def save_sample5(
     ], axis=1).astype(np.float32)
 
     # ==========================================
-    # 5. 标签计算 (Label Generation) - ⭐双通道解耦版
+    # 5. 标签计算 (Label Generation) - ⭐核心修复：异向高斯
     # ==========================================
-    # 💡 核心修改：创建两个通道。通道0: 管道(Tube), 通道1: 关键点(Waypoint)
     labels = np.zeros((N_real, 2), dtype=np.float32)
     
+    # 构建坐标缩放比例尺 [Lx, Ly, Lz]
+    # 通过将点云除以这个比例尺，物理空间被拉伸成了 1x1x1 的标准魔方
     dim_scale = np.array([Lx, Ly, Lz], dtype=np.float32) + eps
     
-    # 坐标转换到 ratio 空间
+    # 计算用于打标签的“变形坐标”
     xyz_ratio = xyz / dim_scale
     wp_ratio = wp_arr / dim_scale
     path_ratio = path_arr / dim_scale
     
-    # --- [通道 1] 计算 y_point (高斯球航路点) ---
+    # --- 计算 d_point (航路点) ---
     mid_wps_ratio = wp_ratio[1:-1]
     if len(mid_wps_ratio) > 0:
+        # 在变形空间里算距离
         dists_to_mid_wps = np.linalg.norm(xyz_ratio[:, None, :] - mid_wps_ratio[None, :, :], axis=2)
         d_point_ratio = np.min(dists_to_mid_wps, axis=1)
-        # 高斯球得分：只存在于通道 1
+        # 注意：这里直接用 d_point_ratio，不需要再除以 scale 了
         y_point = 1.0 * np.exp(- (d_point_ratio ** 2) / (2 * sigma2**2))
     else:
         y_point = np.zeros(N_real, dtype=np.float32)
 
-    # --- [通道 0] 计算 y_line (管状路径) ---
+    # --- 计算 d_line (管状路径) ---
     d_line_ratio = np.full(N_real, float('inf'), dtype=np.float32)
     for k in range(len(path_ratio) - 1):
         A_ratio = path_ratio[k]
         B_ratio = path_ratio[k+1]
+        # 在变形空间里算线段距离
         d_segment = point_to_segment_distance(xyz_ratio, A_ratio, B_ratio)
         d_line_ratio = np.minimum(d_line_ratio, d_segment)
 
-    # 管道得分：只存在于通道 0
+    # 同样，直接使用变形空间算出的比例距离
     y_line = alpha * np.exp(- (d_line_ratio ** 2) / (2 * sigma1**2))
     
-    # ==========================================
-    # 💡 赋值逻辑：不再取 Maximum，而是分家
-    # ==========================================
-    labels[:, 0] = np.maximum(0.3*y_line, y_point)   # 通道 0 负责铺路 (Tube)
-    labels[:, 1] = 1.0 * np.exp(- (d_point_ratio ** 2) / (2 * 0.2**2)) # 通道 1 负责点灯 (Waypoint)
-
-    # 起终点在两个通道都设为 1.0 (或者根据你的需求只设在 Tube)
+    # 融合标签
+    labels[:, 0] = 3.3 * y_line
+    labels[:, 1] = np.maximum(y_line, y_point)
     labels[0, 0], labels[0, 1] = 1.0, 1.0 
     labels[1, 0], labels[1, 1] = 1.0, 1.0
 
     # ==========================================
-    # 6. 保存 (注意保存 waypoints 原始坐标)
+    # 6. 保存
     # ==========================================
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    # 这里的 labels 已经是 [N, 2]
+    # np.savez(file_path, points=points, labels=labels)
+    # 将真实航路点也保存进去，方便后续可视化和测试
     np.savez(file_path, points=points, labels=labels, waypoints=wp_arr)
+    raw_labels = labels.copy()  # 先保存一份原始标签，给后续测试用
     
     if visualize:
-        print(f"[Visualizing] 聚类提取仅针对通道1(Waypoint)...")
+        print(f"[Visualizing] Plotting scores and testing extraction for {file_path}...")
+        labels = raw_labels[:, 1:2]  
         
-        # 💡 核心修改：只根据通道 1 的得分筛选聚类候选点
-        # 即使某个点在管道中心（通道0得分高），但如果它不是拐点（通道1得分低），也会被过滤
-        waypoint_scores = labels[:, 1] 
-        mask = waypoint_scores > 0.8 
-        
+        # 为了加速计算并去除底噪，我们只提取得分大于阈值的点进行聚类
+        mask = labels[:, 0] > 0.8
         high_score_xyz = xyz[mask]
-        high_score_waypoint_labels = waypoint_scores[mask]
+        high_score_labels = labels[mask, 0]
         
         if len(high_score_xyz) > 0:
+            # 💡 核心：把坐标转换到“各向异性比例空间”里去聚类，和标签的生成域保持一致！
             high_score_ratio = high_score_xyz / dim_scale
             
-            # 只对“球标签”进行聚类提取
+            # 调用聚类算法
             extracted_wps_ratio = extract_waypoints(
                 points=high_score_ratio, 
-                scores=high_score_waypoint_labels, 
+                scores=high_score_labels, 
                 eps=0.15,        
-                peak_radius=0.15,
-                z_weight=1.0 
+                peak_radius=0.15,        # 如果调小了的话就航路点就比较多
+                z_weight=1.0             # 已经在 ratio 空间里压扁了 Z 轴，这里无需再额外加权
             )
             
+            # 将聚类出来的结果从比例空间还原回真实物理坐标
             if len(extracted_wps_ratio) > 0:
                 extracted_wps_physical = extracted_wps_ratio * dim_scale
             else:
@@ -2585,9 +1936,9 @@ def save_sample5(
         else:
             extracted_wps_physical = np.empty((0, 3))
             
-        # 绘图时可以分别显示两个通道
-        plot_sample_scores(xyz, labels[:,0], best_path, waypoints, extracted_wps_physical, env_map["map_dim"])
-        plot_sample_scores(xyz, labels[:,1], best_path, waypoints, extracted_wps_physical, env_map["map_dim"])
+        # 传递给统一的绘图函数
+        plot_sample_scores(xyz, raw_labels[:,0:1], best_path, waypoints, extracted_wps_physical, env_map["map_dim"])
+        plot_sample_scores(xyz, labels, best_path, waypoints, extracted_wps_physical, env_map["map_dim"])
 
 
 
@@ -2643,7 +1994,7 @@ if __name__ == '__main__':
     BASE_SEED = 39         # 基础随机种子
     
     # 保存路径
-    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data13"
+    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data14"
     
     # RRT* 参数
     R_AGENT_CRASH = 1.2
@@ -2666,26 +2017,17 @@ if __name__ == '__main__':
         print(f"\n[{map_id+1}/{NUM_MAPS}] 正在生成第 {map_id} 号地图 (Seed={current_seed})...")
         
         # 1. 生成地图
-        # env_map = env_generator(
-        #     rho=random.uniform(0.6, 0.85),   # 数据更丰富不容易出现过拟合
-        #     map_dim=(1500, 1500, 240),
-        #     r_crash_range=(30, 50),
-        #     r_risk_range=(3, 7),
-        #     zmax_range=(30, 240),
-        #     max_iter=5000,
-        #     seed=current_seed
-        # )
-        env_map = env_generator_cluster(
-                    map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
-                    num_clusters=20,             # 建议 10~15 之间，保证有足够空间
-                    chain_length_range=(1, 4),   # 每个簇的圆柱体数量
-                    r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
-                    r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
-                    r_risk_range=(10, 20),       # 风险半径偏移量
-                    zmax_range=(240, 240),
-                    min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
-                    seed=current_seed,
-                )
+        env_map=env_generator_cluster(
+            map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
+            num_clusters=20,             # 建议 10~15 之间，保证有足够空间
+            chain_length_range=(1, 4),   # 每个簇的圆柱体数量
+            r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
+            r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
+            r_risk_range=(10, 20),       # 风险半径偏移量
+            zmax_range=(240, 240),
+            min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
+            seed=BASE_SEED,
+        )
         obstacle_list = env_map["obstacles"]
         print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。开始执行 RRT* 与质量筛选...")
 
@@ -2699,7 +2041,6 @@ if __name__ == '__main__':
         while saved_tasks < TASKS_PER_MAP:
             attempts += 1
             
-            # 为当前任务生成一个唯一的确定的 Seed
             iter_seed = current_seed + attempts * 10000 
             
             # 动态生成 1 个任务
@@ -2711,10 +2052,9 @@ if __name__ == '__main__':
             # ==========================================
             random.seed(iter_seed)
             np.random.seed(iter_seed)
-            # 如果 RRT* 内部还用到了 PyTorch 的随机数（概率极小，但以防万一）
-            # import torch; torch.manual_seed(iter_seed) 
             
-            # 初始化 RRT* (此时它内部无论调用 random.uniform 还是 np.random.rand，结果都被锁死了)
+            
+            # 初始化 RRT*
             planner = RRTStar(
                 start=start, goal=goal, 
                 R_crash=R_AGENT_CRASH, R_risk=R_AGENT_RISK, 
@@ -2757,19 +2097,21 @@ if __name__ == '__main__':
             file_name = f"map{map_id}_task{saved_tasks}.npz"
             full_save_path = os.path.join(SAVE_DIR, file_name)
             
-            save_sample5(
+            save_sample6(
                 env_map,
                 file_path=full_save_path, 
                 best_path=path,
                 waypoints=straight_waypoints,
                 N_attempts=4096,
-                alpha=1,
+                alpha=0.3,
                 sigma1=0.3,
                 sigma2=0.225,
                 eps=1e-8,
-                visualize=True if saved_tasks < 0 else False  # 仅可视化前10个高质量任务
+                visualize=True if saved_tasks < 10 else False  # 仅可视化前10个高质量任务
             )
             
+            if saved_tasks < 0: 
+                plot_tree_and_path_and_waypoints(env_map, planner.node_list, path, straight_waypoints)
             
             # 成功保存一个，计数器加 1
             saved_tasks += 1

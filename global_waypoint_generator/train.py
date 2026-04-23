@@ -18,7 +18,7 @@ SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\checkpoints"
 
 # 2. 真实的训练数据路径
 # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
-DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
+DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data62"
 # DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
 
 START_EPOCH = 1  # 如果从头训练填 1；如果调参直接从第 41 轮开始，填 41
