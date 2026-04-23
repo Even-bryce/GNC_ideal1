@@ -519,7 +519,7 @@ class PointTransformerSeg(nn.Module):
 # ==========================================
 
 class get_model(nn.Module):
-    def __init__(self, num_classes, input_dim=8, dropout_p=0, blocks=[1, 2, 3, 1]):
+    def __init__(self, num_classes, input_dim=8, dropout_p=0, blocks=[2, 3, 4, 6, 3]):
         super(get_model, self).__init__()
         self.input_dim = input_dim
         self.backbone = PointTransformerSeg(
@@ -610,6 +610,64 @@ def focal_loss(logits, targets, weights=None, alpha=0.9, gamma=2.0, mask=None):
         loss = loss[mask]
         
     return loss.mean()
+
+def centernet_focal_loss(logits, targets, weights=None, alpha=2.0, beta=4.0, mask=None, pos_weight=1.0):
+    """
+    仿照你的风格重写的 CenterNet Focal Loss
+    :param alpha: 控制难易样本权重的超参数 (原版 Focal 的 gamma，推荐 2.0)
+    :param beta: 💡 控制高斯拖尾区“宽容度”的超参数 (推荐 4.0)
+    :param pos_weight: 正样本强心剂系数 (如果 mid 还是升不上去，可以改成 10.0)
+    """
+    # 1. 维度对齐处理
+    logits = logits.squeeze(-1) if logits.dim() > 2 else logits
+    targets = targets.squeeze(-1).float() if targets.dim() > 2 else targets
+    # targets = torch.clamp((targets - 0.5) * 2.0, min=0.0, max=1.0)
+    
+    # 2. 概率化并安全截断 (非常关键，防止 log(0) 爆出 NaN)
+    probs = torch.sigmoid(logits)
+    probs = torch.clamp(probs, min=1e-4, max=1.0 - 1e-4)
+    
+    # ==========================================
+    # 💡 核心修改：分界条件弱化为 >= 0.9
+    # ==========================================
+    pos_mask = (targets >= 0.8).float()
+    neg_mask = (targets < 0.8).float()
+    
+    # 3. 计算正样本 Loss (只看 >= 0.9 的点，逼迫它们输出 1.0)
+    # 公式: -log(p) * (1-p)^alpha
+    pos_loss = torch.log(probs) * torch.pow(1 - probs, alpha) * pos_mask * pos_weight
+    
+    # 4. 计算负样本 Loss (处理 < 0.9 的点，带免死金牌)
+    # 💡 魔法系数 neg_weights：(1 - targets)^beta
+    # 如果 targets 是 0.8，(1-0.8)^4 = 0.0016，乘在前面，惩罚直接免除 99%
+    neg_weights = torch.pow(1 - targets, beta)
+    neg_loss = torch.log(1 - probs) * torch.pow(probs, alpha) * neg_weights * neg_mask
+    
+    # 5. 汇总正负 Loss 
+    loss = -(pos_loss + neg_loss)
+    
+    # 6. 附加外部权重
+    if weights is not None:
+        weights = weights.squeeze(-1) if weights.dim() > loss.dim() else weights
+        loss = loss * weights
+        
+    # ==========================================
+    # 💡 核心过滤与归一化
+    # ==========================================
+    if mask is not None:
+        loss = loss[mask]
+        pos_mask = pos_mask[mask]
+        
+    # CenterNet 的关键细节：除以正样本的数量，而不是单纯的 mean()
+    # 如果用 mean()，1万个点里只有 2个正样本，正样本的梯度会被除以 10000，彻底消失
+    num_pos = pos_mask.sum()
+    
+    if num_pos == 0:
+        # 万一当前批次里(或者 mask 内)一个 >= 0.9 的点都没有，就用 mean 保底
+        return loss.mean()
+    else:
+        # 把整个 mask 内的 Loss 总和，平摊到仅有的几个正样本头上
+        return loss.sum() / num_pos
 
 
 def get_skeleton_and_pairs(pb, xb, f_start_b, f_goal_b, delta_s=0.5, R_nms=0.5, K_local=3, delta_d=0.2, K_pairs=3):
@@ -907,7 +965,7 @@ class get_loss(nn.Module):
     # 💡 修改 2: 新增了 K_pairs=3
     # 💡 修改 3: 建议将 alpha3 默认值改为 1.0 (配合映射到 [e^-1, 1])
     # 💡 修改 4: 建议将 tau_c 默认值改为 0.6 (与 tau_s 保持合理的及格线)
-    def __init__(self, w_bce=1.0, w_straight=1.0, w_safety=0.2, w_conn=0.0, 
+    def __init__(self, w_bce=1.0, w_c_focal=0.0, w_straight=1.0, w_safety=0.2, w_conn=0.0, 
                  w_cost=1.0, alpha=0.6, gamma=2.0, delta_s=0.5, delta_d=0.2, 
                  R_nms=0.5, K_local=3, K_pairs=3, r_corridor=0.03, rho=20000.0, 
                  alpha2=1.0, alpha3=1.0, tau_s=0.6, tau_c=0.6, 
@@ -915,7 +973,7 @@ class get_loss(nn.Module):
                  delta_c=0.1, r_connect=0.05):
         super().__init__()
         # 权重设置
-        self.w_bce = w_bce; self.w_straight = w_straight; self.w_safety = w_safety; self.w_conn = w_conn
+        self.w_bce = w_bce; self.w_c_focal=w_c_focal; self.w_straight = w_straight; self.w_safety = w_safety; self.w_conn = w_conn
         self.w_cost = w_cost
         
         # Focal Loss 参数
@@ -962,6 +1020,7 @@ class get_loss(nn.Module):
         
         # 💡 3. 将 mask 传给 focal_loss
         loss += self.w_bce * focal_loss(logits, targets, weights=None, alpha=self.alpha, gamma=self.gamma, mask=mask)
+        loss += self.w_c_focal * centernet_focal_loss(logits, targets, weights=None, alpha=2.0, beta=1.0, mask=mask, pos_weight=10.0)
 
         if self.w_straight > 0:
             l_str, p_s = straightness_loss(

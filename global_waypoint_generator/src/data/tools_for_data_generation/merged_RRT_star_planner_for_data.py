@@ -30,10 +30,7 @@ class Node:
 这个算法的成功率几乎是100%，初始路径的寻找也比较快，但是他的碰撞检测比较简单不鲁棒，且没有我们自己的创新机制，对于密集地图仍然存在穿模现象
 '''
 class RRTStar:
-    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area,
-                 expand_dis=30, max_iter=1500, search_radius=150,
-                 safety_margin=5, safe_margin_weight=5.0,
-                 search_until_max_iter=True):
+    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=30, max_iter=1500, search_radius=150, search_until_max_iter=True):
         """
         初始化 RRT* 算法的参数
         :param start: 起点坐标 [x, y, z]
@@ -63,8 +60,6 @@ class RRTStar:
         self.c_best = float("inf")             # 当前最佳路径成本
         self.c_min = self.calc_dist_to_goal(self.start.x, self.start.y, self.start.z)
         self.use_informed_sampling = False     # 是否启用 Informed 采样
-        self.safety_margin = safety_margin           # 安全边距，用于调整碰撞检测的严格程度
-        self.safe_margin_weight = safe_margin_weight # 贴近安全边界时的软惩罚权重
         
 
     def planning(self):
@@ -173,10 +168,10 @@ class RRTStar:
         随机采样一个点
         :return: 随机点的坐标 [x, y, z]
         """
-        rnd_gen = random.Random()
-        rnd = [rnd_gen.uniform(self.min_rand[0], self.max_rand[0]),
-               rnd_gen.uniform(self.min_rand[1], self.max_rand[1]),
-               rnd_gen.uniform(self.min_rand[2], self.max_rand[2])]
+        # rnd_gen = random.Random()
+        rnd = [random.uniform(self.min_rand[0], self.max_rand[0]),
+               random.uniform(self.min_rand[1], self.max_rand[1]),
+               random.uniform(self.min_rand[2], self.max_rand[2])]
         return rnd
     
     def sample_goal(self, goal_sample_rate):
@@ -185,8 +180,10 @@ class RRTStar:
         :param goal_sample_rate: 采样目标点的概率（0-100）
         :return: 采样点的坐标 [x, y, z]
         """
-        rnd_gen2 = random.Random()    
-        if rnd_gen2.randint(0, 99) > goal_sample_rate:
+        # rnd_gen2 = random.Random()    
+        # if rnd_gen2.randint(0, 99) > goal_sample_rate:
+        #     return self.sample_free()    
+        if random.uniform(0, 99) > goal_sample_rate:
             return self.sample_free()
         else:
             return [self.goal.x, self.goal.y, self.goal.z]
@@ -337,17 +334,13 @@ class RRTStar:
             obs_dy = from_node.y - obs_y
             dist_to_obs = math.sqrt(obs_dx**2 + obs_dy**2)
             
-            # 把安全边距也并入 APF 的排斥作用范围，避免树扩展时贴边
-            repulsion_radius = max(r_risk, r_crash + self.safety_margin)
-            if dist_to_obs < repulsion_radius and dist_to_obs > 1e-6:
+            # 检查是否在障碍物的风险半径内
+            if dist_to_obs < r_risk:
                 obs_direction = np.array([obs_dx, obs_dy, 0]) / dist_to_obs
             else:
                 obs_direction = np.array([0, 0, 0])
-
-            if repulsion_radius > 1e-6:
-                rep_strength = 20 * max(0.0, 1.0 - dist_to_obs / repulsion_radius) ** 2
-            else:
-                rep_strength = 0.0
+                    
+            rep_strength = 20 * (1.0 - dist_to_obs / r_risk) ** 2
             rep_force += rep_strength * obs_direction
         
         # 计算合力方向
@@ -535,33 +528,15 @@ class RRTStar:
         return near_inds
     
     # --------------------------工具函数--------------------------
-    def get_collision_radius(self, obs_R_crash):
-        return self.R_crash + obs_R_crash + self.safety_margin
-
-    def get_risk_radius(self, obs_R_crash, obs_R_risk):
-        return max(self.R_risk + obs_R_risk, self.get_collision_radius(obs_R_crash))
-
-    def check_collision(self, node, near_obstacle_list=None):
+    def check_collision(self, node):
         """
-        判断节点是否进入 crash 区。
-        修正：加入 safety_margin，构建一个比视觉障碍物稍大的“隐形禁区”。
+        判断节点是否进入 crash 区（绝对禁止）。
+        使用距离 <= (agent_R_crash + obs_R_crash) 的标准（XY 平面内，且 Z 重叠）。
         """
-
-        if near_obstacle_list is None:
-            near_obstacle_list = self.obstacle_list
-
-        for cx, cy, z_min, z_max, obs_R_crash, obs_R_risk in near_obstacle_list:
-            
-            # 判定半径 = 机体 + 障碍物 + 安全余量
-            collision_radius = self.get_collision_radius(obs_R_crash)
-            
-            # Z轴判定范围也扩大
-            z_lower = z_min - self.R_crash - self.safety_margin
-            z_upper = z_max + self.R_crash + self.safety_margin
-            
-            if z_lower <= node.z <= z_upper:
+        for cx, cy, z_min, z_max, obs_R_crash, obs_R_risk in self.obstacle_list:
+            if z_min <= node.z <= z_max:
                 dist_xy = math.hypot(node.x - cx, node.y - cy)
-                if dist_xy <= collision_radius:
+                if dist_xy <= (self.R_crash + obs_R_crash):
                     return True
         return False
     
@@ -573,19 +548,15 @@ class RRTStar:
         """
         penalty = 0.0
         for cx, cy, z_min, z_max, obs_R_crash, obs_R_risk in self.obstacle_list:
-            z_lower = z_min - self.R_crash - self.safety_margin
-            z_upper = z_max + self.R_crash + self.safety_margin
-            if z_lower <= node.z <= z_upper:
+            if z_min <= node.z <= z_max:
                 dist_xy = math.hypot(node.x - cx, node.y - cy)
-                crash_threshold = self.get_collision_radius(obs_R_crash)
-                risk_threshold = self.get_risk_radius(obs_R_crash, obs_R_risk)
+                crash_threshold = (self.R_crash + obs_R_crash)
+                risk_threshold = (self.R_risk + obs_R_risk)
                 # 若在 risk 区间内但不在 crash 内
                 if crash_threshold < dist_xy <= risk_threshold:
                     # margin 越小惩罚越大
                     margin = max(1e-3, dist_xy - crash_threshold)
-                    band_width = max(1e-3, risk_threshold - crash_threshold)
-                    closeness = 1.0 - min(1.0, margin / band_width)
-                    penalty += self.safe_margin_weight * (closeness ** 2) / margin
+                    penalty += 0.0 / margin  # 权重可调，暂时调成0
         return penalty
 
 
@@ -601,7 +572,6 @@ class RRTStar:
     
     def check_edge_collision(self, n1, n2):
         """
-        2.5D简化版本的碰撞检测
         检查线段 n1->n2 是否与任何障碍的 crash 区相交（XY 投影 + Z 重叠）
         使用线段到圆心的最短距离与 crash 半径和比较。
         """
@@ -609,16 +579,14 @@ class RRTStar:
             # 如果 z 方向不重叠则跳过
             seg_z_min = min(n1.z, n2.z)
             seg_z_max = max(n1.z, n2.z)
-            z_lower = z_min - self.R_crash - self.safety_margin
-            z_upper = z_max + self.R_crash + self.safety_margin
-            if seg_z_max < z_lower or seg_z_min > z_upper:
+            if seg_z_max < z_min or seg_z_min > z_max:
                 continue
 
             # 计算线段到障碍中心 (cx,cy) 的最短距离（XY 平面）
             dist_xy = self.point_to_line_distance_xy(cx, cy, n1.x, n1.y, n2.x, n2.y)
 
             # 若最短距离小于等于 crash 判定阈值（agent + obs），视为碰撞
-            if dist_xy <= (self.R_crash + obs_R_crash + self.safety_margin):
+            if dist_xy <= (self.R_crash + obs_R_crash):
                 return True
         return False
     
@@ -2573,8 +2541,8 @@ def save_sample5(
     # ==========================================
     # 💡 赋值逻辑：不再取 Maximum，而是分家
     # ==========================================
-    labels[:, 0] = y_line   # 通道 0 负责铺路 (Tube)
-    labels[:, 1] = np.maximum(0.3*y_line, y_point)  # 通道 1 负责点灯 (Waypoint)
+    labels[:, 0] = np.maximum(0.3*y_line, y_point)   # 通道 0 负责铺路 (Tube)
+    labels[:, 1] = 1.0 * np.exp(- (d_point_ratio ** 2) / (2 * 0.2**2)) # 通道 1 负责点灯 (Waypoint)
 
     # 起终点在两个通道都设为 1.0 (或者根据你的需求只设在 Tube)
     labels[0, 0], labels[0, 1] = 1.0, 1.0 
@@ -2675,7 +2643,7 @@ if __name__ == '__main__':
     BASE_SEED = 39         # 基础随机种子
     
     # 保存路径
-    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data12"
+    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data13"
     
     # RRT* 参数
     R_AGENT_CRASH = 1.2
@@ -2683,8 +2651,6 @@ if __name__ == '__main__':
     MAX_ITER = 3000
     EXPAND_DIS = 30
     SEARCH_RADIUS = 150
-    SAFETY_MARGIN = 0.0
-    SAFE_MARGIN_WEIGHT = 0.0
     
     # 质量控制参数
     MIN_TURN_ANGLE = 45  # 判定有效拐弯的最小角度阈值 (度)，小于这个视作平直路线
@@ -2733,18 +2699,28 @@ if __name__ == '__main__':
         while saved_tasks < TASKS_PER_MAP:
             attempts += 1
             
-            # 动态生成 1 个任务。利用 attempts 作为增量改变 seed，确保每次生成不同的点对
-            task = generate_valid_tasks(1, env_map, min_dist=1200, seed=current_seed + attempts)
+            # 为当前任务生成一个唯一的确定的 Seed
+            iter_seed = current_seed + attempts * 10000 
+            
+            # 动态生成 1 个任务
+            task = generate_valid_tasks(1, env_map, min_dist=1200, seed=iter_seed)
             start, goal = task[0]
             
-            # 初始化 RRT*
+            # ==========================================
+            # 💡 核心秘籍：在 RRT 运行前，强行接管全局随机库！
+            # ==========================================
+            random.seed(iter_seed)
+            np.random.seed(iter_seed)
+            # 如果 RRT* 内部还用到了 PyTorch 的随机数（概率极小，但以防万一）
+            # import torch; torch.manual_seed(iter_seed) 
+            
+            # 初始化 RRT* (此时它内部无论调用 random.uniform 还是 np.random.rand，结果都被锁死了)
             planner = RRTStar(
                 start=start, goal=goal, 
                 R_crash=R_AGENT_CRASH, R_risk=R_AGENT_RISK, 
                 obstacle_list=obstacle_list, 
                 rand_area=[[0, 0, 0], [env_map["map_dim"][0], env_map["map_dim"][1], env_map["map_dim"][2]]],
                 expand_dis=EXPAND_DIS, max_iter=MAX_ITER, search_radius=SEARCH_RADIUS,
-                safety_margin=SAFETY_MARGIN, safe_margin_weight=SAFE_MARGIN_WEIGHT,
                 search_until_max_iter=True
             )
             

@@ -416,7 +416,7 @@ def evaluate_A(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02
                 visualize_result(
                     xyz_vis, target_vis, prob_vis, 
                     start_pt, goal_pt, gt_mid_waypoints, pred_mid_waypoints, true_mid_wps,
-                    threshold=0.4
+                    threshold=0.5
                 )
 
                 cmd = input("Press Enter for next sample, or 'n' to stop: ")
@@ -494,7 +494,7 @@ def evaluate_B(model_B_path, model_A_path, data_dir, map_dim, cluster_eps=0.02, 
     model_A.eval()
 
     print("加载 Model B (航路点精测网络)...")
-    model_B = get_model(num_classes=1, input_dim=real_input_dim + 1, blocks=[1,1]).to(device) # 💡 输入维度 +1
+    model_B = get_model(num_classes=1, input_dim=real_input_dim + 1, blocks=[1,2,1]).to(device) # 💡 输入维度 +1
     model_B.load_state_dict(torch.load(model_B_path, map_location=device))
     model_B.eval()
 
@@ -827,7 +827,7 @@ def evaluate_B(model_B_path, model_A_path, data_dir, map_dim, cluster_eps=0.02, 
 if __name__ == "__main__":
     
     # DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data9"
-    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data11"
+    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
     # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
     # CKPT_PATH = r"C:\Users\Administrator\Desktop\experiments\checkpoints\best_model.pth"
     A_CKPT_PATH = r"c:\Users\Administrator\Desktop\experiments\checkpoints\Stage_A\best_model.pth"

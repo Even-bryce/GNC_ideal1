@@ -18,13 +18,13 @@ SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\checkpoints"
 
 # 2. 真实的训练数据路径
 # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
-DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data11"
+DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
 # DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
 
 START_EPOCH = 1  # 如果从头训练填 1；如果调参直接从第 41 轮开始，填 41
 PRETRAINED_CKPT = r"C:\Users\Administrator\Desktop\experiments\checkpoints\ckpt_epoch_40.pth" # 填入你第40轮保存的权重路径
 
-TRAIN_STAGE = "B"  # 可选: "A" (训练管道) 或 "B" (训练航路点)
+TRAIN_STAGE = "A"  # 可选: "A" (训练管道) 或 "B" (训练航路点)
 MODEL_A_CKPT = r"C:\Users\Administrator\Desktop\experiments\checkpoints\Stage_A\best_model.pth" # 阶段 B 需要用到 A 的权重
 
 GAMMA = 2
@@ -219,7 +219,7 @@ def train_one_epoch_B(model_B, model_A, loader, criterion, optimizer, device, ep
             
         # 2. 完美拼接！在通道维度 (dim=1) 把 9 个特征和 1 个概率拼起来
         points_with_prior = torch.cat([points, probs_A], dim=1) # 得到 [B, 10, N]
-        # points_with_prior = points
+        points_with_prior = points
 
         # ------------------------------------------
         # 开始训练 Model B
@@ -254,8 +254,8 @@ def train_one_epoch_B(model_B, model_A, loader, criterion, optimizer, device, ep
             if combined_mask.sum() > 0:
                 max_probs.append(probs_B[combined_mask].max().item())
             
-            # 💡 负样本指标计算 (基于高斯真值 < 0.1 且 在管内)
-            neg_mask = (targets_wp < 0.1) & combined_mask 
+            # 💡 负样本指标计算 (基于高斯真值 < 0.5 且 在管内)
+            neg_mask = (targets_wp < 0.5) & combined_mask 
             if neg_mask.sum() > 0:
                 neg_probs = probs_B[neg_mask]
                 neg_max_probs.append(neg_probs.max().item())
@@ -400,7 +400,7 @@ def validate_B(model_B, model_A, loader, criterion, device, tube_thresh=0.4):
             # 2. 在通道轴 (dim=1) 拼接，得到 [B, 10, N]
             # 注意：千万不要用 dim=-1，因为你的 points 已经是 [B, C, N] 格式了
             points_with_prior = torch.cat([points, probs_A], dim=1)
-            # points_with_prior = points
+            points_with_prior = points
 
             # 💡 5. 传入联合掩码和新特征给 Model B
             output_B = model_B(points_with_prior, mask=combined_mask)
@@ -466,7 +466,7 @@ def main():
         print("🚀 启动阶段一：训练管道探路模型 (Model A)")
         print("="*50)
         
-        model_A = get_model(num_classes=1, input_dim=real_input_dim, dropout_p=0.2).to(device)
+        model_A = get_model(num_classes=1, input_dim=real_input_dim, dropout_p=0.0).to(device)
         
         # ... (这里保留你原本的 Model A 预训练加载逻辑和 loss 配置) ...
         criterion = get_loss(
@@ -562,18 +562,19 @@ def main():
             
         # 💡 2. 实例化 Model B (核心：输入维度 + 1，因为拼接了 P_tube)
         # 注意：这里你可以把 dropout 调高一点，防止在小规模正样本上过拟合
-        model_B = get_model(num_classes=1, input_dim=real_input_dim + 1, dropout_p=0.1, blocks=[1,1]).to(device)
+        model_B = get_model(num_classes=1, input_dim=real_input_dim, dropout_p=0.2, blocks=[1,2,1]).to(device)
         print(f"[*] 🚀 Model B 已初始化，输入特征维度已自动扩展至: {real_input_dim + 1}")
 
         # 💡 3. Model B 专属的 loss
         criterion_B = get_loss(
-                            w_bce=20.0,
+                            w_bce=0.0,
+                            w_c_focal=1.0,
                             w_straight=0.0,
                             w_safety=0.0,
                             w_conn=0.0,
                             w_cost=0.0,
-                            alpha=0.9,
-                            gamma=1.5,
+                            alpha=0.6,
+                            gamma=2.0,
                             delta_s=0.7,
                             delta_d=0.2,
                             r_corridor=0.05,
@@ -605,7 +606,7 @@ def main():
                 optimizer=optimizer_B, 
                 device=device, 
                 epoch_idx=epoch, 
-                tube_thresh=0.4 # 宽容截流阈值
+                tube_thresh=0.5 # 宽容截流阈值
             )
             
             # 💡 调用专属的 validate_B
@@ -615,7 +616,7 @@ def main():
                 loader=val_loader, 
                 criterion=criterion_B, 
                 device=device,
-                tube_thresh=0.4
+                tube_thresh=0.5
             )
             
             scheduler_B.step()
