@@ -1892,7 +1892,8 @@ def save_sample6(
     y_line = alpha * np.exp(- (d_line_ratio ** 2) / (2 * sigma1**2))
     
     # 融合标签
-    labels[:, 0] = 3.3 * y_line
+    # labels[:, 0] = 3.3 * y_line
+    labels[:, 0] = np.exp(- (d_line_ratio ** 2) / (2 * 0.3**2))
     labels[:, 1] = np.maximum(y_line, y_point)
     labels[0, 0], labels[0, 1] = 1.0, 1.0 
     labels[1, 0], labels[1, 1] = 1.0, 1.0
@@ -1994,7 +1995,7 @@ if __name__ == '__main__':
     BASE_SEED = 39         # 基础随机种子
     
     # 保存路径
-    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data14"
+    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data15"
     
     # RRT* 参数
     R_AGENT_CRASH = 1.2
@@ -2104,8 +2105,8 @@ if __name__ == '__main__':
                 waypoints=straight_waypoints,
                 N_attempts=4096,
                 alpha=0.3,
-                sigma1=0.3,
-                sigma2=0.225,
+                sigma1=0.2,
+                sigma2=0.15,
                 eps=1e-8,
                 visualize=True if saved_tasks < 10 else False  # 仅可视化前10个高质量任务
             )

@@ -587,6 +587,7 @@ class get_model(nn.Module):
 # ==========================================
 
 def focal_loss(logits, targets, weights=None, alpha=0.9, gamma=2.0, mask=None):
+    
     logits = logits.squeeze(-1) if logits.dim() > 2 else logits
     targets = targets.squeeze(-1).float() if targets.dim() > 2 else targets
     probs = torch.sigmoid(logits)
@@ -1020,7 +1021,7 @@ class get_loss(nn.Module):
         
         # 💡 3. 将 mask 传给 focal_loss
         loss += self.w_bce * focal_loss(logits, targets, weights=None, alpha=self.alpha, gamma=self.gamma, mask=mask)
-        loss += self.w_c_focal * centernet_focal_loss(logits, targets, weights=None, alpha=2.0, beta=1.0, mask=mask, pos_weight=10.0)
+        loss += self.w_c_focal * centernet_focal_loss(logits, targets, weights=None, alpha=2.0, beta=2.0, mask=mask, pos_weight=10.0)
 
         if self.w_straight > 0:
             l_str, p_s = straightness_loss(

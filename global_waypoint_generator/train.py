@@ -18,7 +18,7 @@ SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\checkpoints"
 
 # 2. 真实的训练数据路径
 # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
-DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data62"
+DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data15"
 # DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
 
 START_EPOCH = 1  # 如果从头训练填 1；如果调参直接从第 41 轮开始，填 41
@@ -33,6 +33,25 @@ TOTAL_EPOCHS = 50
 WARMUP_EPOCHS = 40    
 # ---------------------      
 # ---------------------
+
+def _filter_stage_b_batch(points, targets_wp, valid_mask, probs_A, combined_mask, min_points=64):
+    combined_counts = combined_mask.sum(dim=1)
+    keep_samples = combined_counts >= min_points
+
+    if keep_samples.all():
+        return points, targets_wp, valid_mask, probs_A, combined_mask, False
+
+    if not keep_samples.any():
+        return None, None, None, None, None, True
+
+    return (
+        points[keep_samples],
+        targets_wp[keep_samples],
+        valid_mask[keep_samples],
+        probs_A[keep_samples],
+        combined_mask[keep_samples],
+        False,
+    )
 
 def train_one_epoch_A(model, loader, criterion, optimizer, device, epoch_idx):
     # # --- Warm-up 策略保持原样 ---
@@ -165,6 +184,7 @@ def train_one_epoch_B(model_B, model_A, loader, criterion, optimizer, device, ep
     model_A.eval() # 💡 管道网络必须在 eval 模式，且不更新梯度
     
     total_loss = 0.0
+    processed_batches = 0
     
     # --- Statistics Lists ---
     max_probs, neg_max_probs, neg_fpr_list = [], [], []
@@ -198,13 +218,18 @@ def train_one_epoch_B(model_B, model_A, loader, criterion, optimizer, device, ep
             
             # 生成管道掩码 (比如 > 0.1 认为是管内)
             # 注意 squeeze 保证维度和 valid_mask [B, N] 对齐
-            tube_mask = (probs_A > tube_thresh).squeeze() 
+            tube_mask = (probs_A > tube_thresh).squeeze(-1) if probs_A.dim() == 3 else (probs_A > tube_thresh).squeeze()
 
         # ==========================================
         # 💡 级联改动 3：合并掩码 (Padding掩码 AND 管道掩码)
         # 只有既是真实点，又在管道内的点，才参与后续计算和 Loss 惩罚
         # ==========================================
         combined_mask = valid_mask & tube_mask
+        points, targets_wp, valid_mask, probs_A, combined_mask, should_skip = _filter_stage_b_batch(
+            points, targets_wp, valid_mask, probs_A, combined_mask, min_points=64
+        )
+        if should_skip:
+            continue
 
         # ==========================================
         # 💡 级联改动 4：特征拼接 (原始特征 + 管道概率)
@@ -236,6 +261,7 @@ def train_one_epoch_B(model_B, model_A, loader, criterion, optimizer, device, ep
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
+        processed_batches += 1
         
         ep_l_str.append(metrics.get("loss_straight", 0.0))
         ep_l_cost.append(metrics.get("loss_cost", 0.0))
@@ -255,7 +281,7 @@ def train_one_epoch_B(model_B, model_A, loader, criterion, optimizer, device, ep
                 max_probs.append(probs_B[combined_mask].max().item())
             
             # 💡 负样本指标计算 (基于高斯真值 < 0.5 且 在管内)
-            neg_mask = (targets_wp < 0.5) & combined_mask 
+            neg_mask = (targets_wp < 0.1) & combined_mask 
             if neg_mask.sum() > 0:
                 neg_probs = probs_B[neg_mask]
                 neg_max_probs.append(neg_probs.max().item())
@@ -300,7 +326,7 @@ def train_one_epoch_B(model_B, model_A, loader, criterion, optimizer, device, ep
           f"  > Probs: SE:{avg_se_mean:.3f} | Mid:{avg_mid_mean:.3f} | NegMax:{avg_neg_max:.3f} | FPR:{avg_fpr:.4f} | FNR:{avg_mid_fnr:.4f}\n"
           f"  > Graph: Phi_s:{avg_phi_s:.3f} | Phi_c:{avg_phi_c:.3f} | L_str:{avg_l_str:.4f} | L_cost:{avg_l_cost:.4f}") 
 
-    return total_loss / len(loader)
+    return total_loss / max(processed_batches, 1)
 class EarlyStopping:
     def __init__(self, patience=15, delta=0.001, save_dir='checkpoints'):
         """
@@ -364,6 +390,7 @@ def validate_B(model_B, model_A, loader, criterion, device, tube_thresh=0.4):
     model_A.eval() 
     
     total_loss = 0.0
+    processed_batches = 0
 
     # 💡 验证阶段全程不需要计算梯度，极大节省显存并加速
     with torch.no_grad():
@@ -386,6 +413,11 @@ def validate_B(model_B, model_A, loader, criterion, device, tube_thresh=0.4):
 
             # 💡 3. 合并掩码 (有效点 AND 管内点)
             combined_mask = valid_mask & tube_mask
+            points, targets_wp, valid_mask, probs_A, combined_mask, should_skip = _filter_stage_b_batch(
+                points, targets_wp, valid_mask, probs_A, combined_mask, min_points=64
+            )
+            if should_skip:
+                continue
 
             # 💡 4. 特征拼接 (对齐维度拼接)
             # 1. 确保 probs_A 形状为 [B, 1, N]
@@ -409,8 +441,9 @@ def validate_B(model_B, model_A, loader, criterion, device, tube_thresh=0.4):
             # 💡 6. 用联合掩码计算 Validation Loss
             loss, _ = criterion(logits_B, targets_wp, points_with_prior, mask=combined_mask)
             total_loss += loss.item()
+            processed_batches += 1
 
-    return total_loss / len(loader)
+    return total_loss / max(processed_batches, 1)
 
 def plot_loss_curve(train_loss, val_loss, save_dir):
     epochs = range(1, len(train_loss) + 1)
@@ -454,7 +487,7 @@ def main():
     val_loader   = build_dataloader(val_files, batch_size=32, shuffle=False)
 
     # --- 动态探针 ---
-    sample_points, _, _, _ = next(iter(train_loader)) # 记得解包 5 个变量哦
+    sample_points, _, _, _ = next(iter(train_loader)) # 记得解包 4 个变量哦
     real_input_dim = sample_points.shape[-1]
     print(f"[*] 动态检测到原始数据特征维度为: {real_input_dim}")
 
@@ -562,13 +595,13 @@ def main():
             
         # 💡 2. 实例化 Model B (核心：输入维度 + 1，因为拼接了 P_tube)
         # 注意：这里你可以把 dropout 调高一点，防止在小规模正样本上过拟合
-        model_B = get_model(num_classes=1, input_dim=real_input_dim, dropout_p=0.2, blocks=[1,2,1]).to(device)
+        model_B = get_model(num_classes=1, input_dim=real_input_dim, dropout_p=0.0, blocks=[2,3,4,3]).to(device)
         print(f"[*] 🚀 Model B 已初始化，输入特征维度已自动扩展至: {real_input_dim + 1}")
 
         # 💡 3. Model B 专属的 loss
         criterion_B = get_loss(
-                            w_bce=0.0,
-                            w_c_focal=1.0,
+                            w_bce=20.0,
+                            w_c_focal=0.0,
                             w_straight=0.0,
                             w_safety=0.0,
                             w_conn=0.0,

@@ -494,7 +494,7 @@ def evaluate_B(model_B_path, model_A_path, data_dir, map_dim, cluster_eps=0.02, 
     model_A.eval()
 
     print("加载 Model B (航路点精测网络)...")
-    model_B = get_model(num_classes=1, input_dim=real_input_dim + 1, blocks=[1,2,1]).to(device) # 💡 输入维度 +1
+    model_B = get_model(num_classes=1, input_dim=real_input_dim, blocks=[2,3,4,3]).to(device) # 💡 输入维度 +1
     model_B.load_state_dict(torch.load(model_B_path, map_location=device))
     model_B.eval()
 
@@ -545,6 +545,7 @@ def evaluate_B(model_B_path, model_A_path, data_dir, map_dim, cluster_eps=0.02, 
 
             # 拼接 10 维特征
             points_with_prior = torch.cat([points_trans, probs_A], dim=1) # [B, 10, N]
+            points_with_prior = points_trans
 
             # ==========================================
             # 💡 级联推理：Model B 专心寻峰
@@ -629,7 +630,7 @@ def evaluate_B(model_B_path, model_A_path, data_dir, map_dim, cluster_eps=0.02, 
             else:
                 true_mid_wps = np.empty((0, 3))
 
-            pred_mask_vis = mid_prob > 0.8
+            pred_mask_vis = mid_prob > 0.6
             pred_xyz_filtered = mid_xyz[pred_mask_vis].cpu().numpy()
             pred_scores_filtered = mid_prob[pred_mask_vis].cpu().numpy()
             
@@ -827,7 +828,7 @@ def evaluate_B(model_B_path, model_A_path, data_dir, map_dim, cluster_eps=0.02, 
 if __name__ == "__main__":
     
     # DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data9"
-    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
+    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data15"
     # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
     # CKPT_PATH = r"C:\Users\Administrator\Desktop\experiments\checkpoints\best_model.pth"
     A_CKPT_PATH = r"c:\Users\Administrator\Desktop\experiments\checkpoints\Stage_A\best_model.pth"
@@ -845,20 +846,20 @@ if __name__ == "__main__":
     CLUSTER_EPS = 0.15 
     PEAK_RADIUS = 0.15 
 
-    evaluate_A(
-        model_path=A_CKPT_PATH, 
-        data_dir=DATA_DIR, 
-        map_dim=MAP_DIM,
-        cluster_eps=CLUSTER_EPS,
-        peak_radius=PEAK_RADIUS
-    )
-
-    # evaluate_B(
-    #     model_B_path=B_CKPT_PATH,
-    #     model_A_path=A_CKPT_PATH,
+    # evaluate_A(
+    #     model_path=A_CKPT_PATH, 
     #     data_dir=DATA_DIR, 
     #     map_dim=MAP_DIM,
     #     cluster_eps=CLUSTER_EPS,
-    #     peak_radius=PEAK_RADIUS,
-    #     tube_thresh=0.4
+    #     peak_radius=PEAK_RADIUS
     # )
+
+    evaluate_B(
+        model_B_path=B_CKPT_PATH,
+        model_A_path=A_CKPT_PATH,
+        data_dir=DATA_DIR, 
+        map_dim=MAP_DIM,
+        cluster_eps=CLUSTER_EPS,
+        peak_radius=PEAK_RADIUS,
+        tube_thresh=0.4
+    )
