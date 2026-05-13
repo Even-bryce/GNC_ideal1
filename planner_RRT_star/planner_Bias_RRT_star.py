@@ -16,7 +16,6 @@ class Node:
         self.parent = None      # 节点的父节点，用于回溯路径
         self.cost = 0.0         # 从起点到该节点的路径成本
 
-
 # 定义 RRTStar 类，用于实现 RRT* 算法
 class RRTStar:
     def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=25, max_iter=1500, search_radius=20.0, search_until_max_iter=True):
@@ -36,7 +35,7 @@ class RRTStar:
         self.goal = Node(goal[0], goal[1], goal[2])     # 创建目标节点
         self.min_rand = rand_area[0]           # 随机采样区域的最小值
         self.max_rand = rand_area[1]           # 随机采样区域的最大值
-        self.z_rand = rand_area[2]          # 随机采样区域的最大z值
+        self.z_rand = rand_area[2]             # 随机采样区域的最大z值
         self.expand_dis = expand_dis           # 每次扩展的步长
         self.max_iter = max_iter               # 最大迭代次数
         self.obstacle_list = obstacle_list     # 存储障碍物列表
@@ -45,7 +44,7 @@ class RRTStar:
         self.R_crash = R_crash   # 本体碰撞半径
         self.R_risk = R_risk     # 本体风险半径
         self.search_until_max_iter = search_until_max_iter  # 是否持续搜索直到最大迭代次数
-            
+
     def planning(self):
         """
         主规划函数，用于生成从起点到目标的路径
@@ -132,7 +131,7 @@ class RRTStar:
         :param goal_sample_rate: 采样目标点的概率（0-100）
         :return: 采样点的坐标 [x, y, z]
         """
-        if random.randint(0, 100) > goal_sample_rate :
+        if random.randint(0, 100) > goal_sample_rate:
             return self.sample_free()
         else:
             return [self.goal.x, self.goal.y, self.goal.z]
@@ -249,7 +248,7 @@ class RRTStar:
                     near_node.parent = new_node
                     near_node.cost = new_cost
                     self.propagate_cost_to_leaves(near_node)
-
+                    
     def search_best_goal_node(self):
         """
         在树中搜索距目标点一定半径内且可达的节点
@@ -469,10 +468,10 @@ if __name__ == '__main__':
     env_map = env_generator(
         rho=0.6, 
         map_size=1500,
+        z_size=240,
         r_crash_range=(30, 50),
         r_risk_range=(3, 7),
         zmax_range=(30, 240),
-        z_size=240,
         max_iter=5000,
         seed=40
     )

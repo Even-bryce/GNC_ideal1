@@ -1,7 +1,6 @@
 import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
-from res_show import plot_map
 
 def env_generator( 
     rho=0.8,
@@ -62,19 +61,3 @@ def env_generator(
     }
 
     return map_dict
-
-
-
-if __name__ == "__main__":
-    
-    env_map = env_generator(
-        rho=0.6, 
-        map_size=1500,
-        r_crash_range=(30, 50),
-        r_risk_range=(3, 7),
-        zmax_range=(30, 240),
-        z_size=240,
-        max_iter=5000,
-        seed=40
-    )
-    plot_map(env_map)

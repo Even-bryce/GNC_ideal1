@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
 from matplotlib.patches import Circle
 from matplotlib.lines import Line2D
-from env_generator_for_data import env_generator
+from env_generator import env_generator
 
 def add_cylinder(ax, xc, yc, zmin, zmax, radius, color, alpha=1.0, wireframe=False, resolution=20):
     """
@@ -43,7 +43,7 @@ def plot_tree_and_path(env_map, node_list=None, path=None, waypoint_list=None):
     绘制障碍物、RRT 树、最终路径、航路点
     """
     obstacles = env_map["obstacles"]
-    map_size = env_map["map_dim"][0]  # 假设为正方体，Z范围另行获取
+    map_size = env_map["size"]
 
     fig = plt.figure(figsize=(12, 8))
     ax = fig.add_subplot(111, projection='3d')
@@ -88,7 +88,8 @@ def plot_tree_and_path(env_map, node_list=None, path=None, waypoint_list=None):
                    color='purple', s=80, label='Waypoints', depthshade=True)
 
     # ---------- 4. 地图边界和装饰 ----------
-    Lx, Ly, Lz = env_map["map_dim"]
+    Lx, Ly = env_map["size"]
+    Lz = env_map["z_size"]
     # 绘制底面边界框
     bx = [0, Lx, Lx, 0, 0]
     by = [0, 0, Ly, Ly, 0]
@@ -214,45 +215,45 @@ def plot_map_and_waypoint(env_map, waypoints):
 
     fig = plt.figure(figsize=(14, 6))
 
-    # # ==========================
-    # # (1) ---- 3D 图（高效版） ----
-    # # ==========================
-    # ax1 = fig.add_subplot(121, projection='3d')
+    # ==========================
+    # (1) ---- 3D 图（高效版） ----
+    # ==========================
+    ax1 = fig.add_subplot(121, projection='3d')
 
-    # for obs in obstacles:
-    #     xc, yc, zmin, zmax, r_crash, r_risk = obs
+    for obs in obstacles:
+        xc, yc, zmin, zmax, r_crash, r_risk = obs
 
-    #     theta = np.linspace(0, 2 * np.pi, 40)
-    #     z = np.linspace(zmin, zmax, 20)
-    #     theta_grid, z_grid = np.meshgrid(theta, z)
+        theta = np.linspace(0, 2 * np.pi, 40)
+        z = np.linspace(zmin, zmax, 20)
+        theta_grid, z_grid = np.meshgrid(theta, z)
 
-    #     # 风险柱体（外层）
-    #     x_risk = xc + r_risk * np.cos(theta_grid)
-    #     y_risk = yc + r_risk * np.sin(theta_grid)
-    #     ax1.plot_surface(x_risk, y_risk, z_grid,
-    #                     color='gray', alpha=0.2, linewidth=0)
+        # 风险柱体（外层）
+        x_risk = xc + r_risk * np.cos(theta_grid)
+        y_risk = yc + r_risk * np.sin(theta_grid)
+        ax1.plot_surface(x_risk, y_risk, z_grid,
+                        color='gray', alpha=0.2, linewidth=0)
 
-    #     # 碰撞柱体（内层）
-    #     x_crash = xc + r_crash * np.cos(theta_grid)
-    #     y_crash = yc + r_crash * np.sin(theta_grid)
-    #     ax1.plot_surface(x_crash, y_crash, z_grid,
-    #                     color='gray', alpha=0.7, linewidth=0)
+        # 碰撞柱体（内层）
+        x_crash = xc + r_crash * np.cos(theta_grid)
+        y_crash = yc + r_crash * np.sin(theta_grid)
+        ax1.plot_surface(x_crash, y_crash, z_grid,
+                        color='gray', alpha=0.7, linewidth=0)
 
-    # # 地图边界
+    # 地图边界
     bx = [0, map_size, map_size, 0, 0]
     by = [0, 0, map_size, map_size, 0]
     bz = [0, 0, 0, 0, 0]
-    # ax1.plot(bx, by, bz, 'k-', linewidth=2)
+    ax1.plot(bx, by, bz, 'k-', linewidth=2)
 
-    # ax1.set_xlim(0, map_size)
-    # ax1.set_ylim(0, map_size)
-    # max_z = max([obs[3] for obs in obstacles]) if obstacles else 200
-    # ax1.set_zlim(0, max_z)
+    ax1.set_xlim(0, map_size)
+    ax1.set_ylim(0, map_size)
+    max_z = max([obs[3] for obs in obstacles]) if obstacles else 200
+    ax1.set_zlim(0, max_z)
 
-    # ax1.set_xlabel("X")
-    # ax1.set_ylabel("Y")
-    # ax1.set_zlabel("Z")
-    # ax1.set_title("3D Cylindrical Obstacle Map")
+    ax1.set_xlabel("X")
+    ax1.set_ylabel("Y")
+    ax1.set_zlabel("Z")
+    ax1.set_title("3D Cylindrical Obstacle Map")
 
     # ==========================
     # XY 俯视图
@@ -291,16 +292,3 @@ def plot_map_and_waypoint(env_map, waypoints):
     plt.tight_layout()
     plt.show()
     
-if __name__ == '__main__':
-    # 生成地图
-    env_map = env_generator(
-        rho=0.4, 
-        map_dim=(1500, 1500, 240),
-        r_crash_range=(30, 50),
-        r_risk_range=(3, 7),
-        zmax_range=(30, 240),
-        max_iter=10000,
-        seed=2
-    )
-    waypoints = [[0, 0, 0], [700, 380, 0], [1000, 680, 0], [1200, 1100, 0], [1500, 1500, 100]]
-    plot_map_and_waypoint(env_map, waypoints)

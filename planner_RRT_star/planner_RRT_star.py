@@ -6,7 +6,6 @@ import time
 from mpl_toolkits.mplot3d import Axes3D
 from env_generator import env_generator
 from res_show import plot_map, plot_tree_and_path
-# from path_optimizer import PathOptimizer
 
 # 定义 Node 类，用于表示树中的每个节点
 class Node:
@@ -17,10 +16,9 @@ class Node:
         self.parent = None      # 节点的父节点，用于回溯路径
         self.cost = 0.0         # 从起点到该节点的路径成本
 
-
 # 定义 RRTStar 类，用于实现 RRT* 算法
 class RRTStar:
-    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=25, max_iter=1500, search_radius=75, search_until_max_iter=True):
+    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=25, max_iter=1500, search_radius=20.0, search_until_max_iter=False):
         """
         初始化 RRT* 算法的参数
         :param start: 起点坐标 [x, y, z]
@@ -37,27 +35,30 @@ class RRTStar:
         self.goal = Node(goal[0], goal[1], goal[2])     # 创建目标节点
         self.min_rand = rand_area[0]           # 随机采样区域的最小值
         self.max_rand = rand_area[1]           # 随机采样区域的最大值
-        self.z_rand = rand_area[2]          # 随机采样区域的最大z值
+        self.z_rand = rand_area[2]             # 随机采样区域的最大z值
         self.expand_dis = expand_dis           # 每次扩展的步长
         self.max_iter = max_iter               # 最大迭代次数
         self.obstacle_list = obstacle_list     # 存储障碍物列表
         self.node_list = [self.start]          # 树节点列表，初始化时只包含起点
         self.search_radius = search_radius     # 搜索邻近节点的半径
-        self.R_crash = R_crash   # 本体碰撞半径
-        self.R_risk = R_risk     # 本体风险半径
+        self.R_crash = R_crash                 # 本体碰撞半径
+        self.R_risk = R_risk                   # 本体风险半径
         self.search_until_max_iter = search_until_max_iter  # 是否持续搜索直到最大迭代次数
-        
 
     def planning(self):
         """
         主规划函数，用于生成从起点到目标的路径
-        :return: 如果找到路径，返回路径坐标列表；否则返回 None
+        返回首次找到的可行路径，和循环结束后找到的最优路径；否则返回 None
         """
-
         self.goal.cost = float('inf')
         self.goal.parent = None
+        
         first_path_found = False
+        first_path = None
+        iteration_find_path = 0
 
+        start_time = time.time()
+        
         for i in range(self.max_iter):  # 循环执行最大迭代次数
             # 随机采样
             rnd = self.sample_free()
@@ -80,39 +81,38 @@ class RRTStar:
                 self.node_list.append(new_node)  
                 # 重新连接邻近节点
                 self.rewire(new_node, near_inds)
-                
-                # 记录首次找到路径的信息
+
+                # 未找到路径时
                 if not first_path_found:
-                    # 1. 尝试寻找是否能连通终点
+                    # 寻找可直接连接到目标点的节点
                     potential_goal_ind = self.search_best_goal_node()
-                    
-                    # 如果找到了 (不为 None)
+                    # 若存在可直连的节点
                     if potential_goal_ind is not None:
                         first_path_found = True
-                        
-                        # 生成坐标路径
-                        first_path_coords = self.generate_final_path_from_node(potential_goal_ind)
+                        # 生成路径
+                        first_path = self.generate_final_path_from_node(potential_goal_ind)
                         # 补充终点
-                        first_path_coords.append([self.goal.x, self.goal.y, self.goal.z])
+                        first_path.append([self.goal.x, self.goal.y, self.goal.z])
                         
-                        # 计算纯几何长度
-                        first_path_len = calculate_path_length(first_path_coords)
+                        # 首次找到路径的迭代轮数与时间       
+                        iteration_find_path = i
+                        end_time = time.time()
+                        time_first = end_time - start_time
                         
-                        print(f"\n[提示] 发现首条可行路径！迭代次数: {i}")
-                        print(f"[数据] 首条路径物理长度: {first_path_len:.4f} 米")
+                        # 可设：找到首次路径就停止
                         if not self.search_until_max_iter:
-                            print("[提示] 由于设置为不持续搜索，规划结束。\n")
-                            return first_path_coords
+                            return time_first, iteration_find_path, first_path, first_path
         
         last_index = self.search_best_goal_node()
 
         if last_index is not None:
-            path_coords = self.generate_final_path_from_node(last_index)
+            # 用剩余迭代次数优化后的路径
+            final_best_path = self.generate_final_path_from_node(last_index)
             # 补充终点
-            path_coords.append([self.goal.x, self.goal.y, self.goal.z])
-            return path_coords
-    
-        return None
+            final_best_path.append([self.goal.x, self.goal.y, self.goal.z])
+            return time_first, iteration_find_path, first_path, final_best_path 
+
+        return None, None, None, None
     
     def sample_free(self):
         """
@@ -466,84 +466,103 @@ if __name__ == '__main__':
     # 1. 生成地图
     print("正在生成地图...")
     env_map = env_generator(
-        rho=0.6, 
+        rho=0.4, 
         map_size=1500,
+        z_size=240,
         r_crash_range=(30, 50),
         r_risk_range=(3, 7),
         zmax_range=(30, 240),
-        z_size=240,
-        max_iter=5000,
+        max_iter=10000,
         seed=40
     )
     obstacle_list = env_map["obstacles"]
     print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。")
-
+    # plot_map(env_map)
     
-    tasks = [([0,0,0],[1500, 1500, 50]),([0, 1500, 0],[1500, 0, 150])] #手动选择的起终点
+    # 2. 生成一定数量的起终点
+    num_of_tasks = 1
+    # print("正在生成", num_of_tasks, "对合法的起终点")
+    # tasks = generate_valid_tasks(num_of_tasks, env_map, seed=100)
+    # tasks = [([0, 0, 0], [5000, 5000, 100])]
+    tasks = [([0, 0, 0], [1500, 1500, 100])]
 
-    #tasks = generate_valid_tasks(10, env_map, seed=42)
-    
     # 3. 运行测试
     success_times = []
     path_lengths = []
     
-    # 设定 RRT* 参数 (Agent 自身尺寸设为 1.2m)
+    # 设定 RRT* 参数
     r_agent_crash = 1.2
     r_agent_risk = 1.7
+    env_results = []
+    print(f"{'Task':<4} | {'Status':<7} | {'Iter':<6} | {'Time_first':<6}  | {'Length_first':<6} | {'Time_final':<6} | {'Length_final':<6}")
+    print("-" * 80)
     
-    print(f"{'Task ID':<10} | {'Status':<10} | {'Time (s)':<10} | {'Length (m)':<10}")
-    print("-" * 50)
-
+    # 对每个起终点，进行num_pf_tests次规划
+    num_of_tests = 2
     for i, (start, goal) in enumerate(tasks):
-        # 初始化 RRT*
-        planner = RRTStar(
-            start=start, 
-            goal=goal, 
-            R_crash=r_agent_crash, 
-            R_risk=r_agent_risk, 
-            obstacle_list=obstacle_list, 
-            rand_area=[0, env_map["size"], env_map["z_size"]], 
-            expand_dis=30,    # 步长
-            max_iter=3000,    # 迭代次数 (为了测试速度设为1000，你可以增加到3000)
-            search_radius=75
-        )
-        start_time = time.time()
-        path = planner.planning()
-        
-        end_time = time.time()
-        
-        elapsed = end_time - start_time
-        
-        if path is not None:
-            plen = calculate_path_length(path)
-            success_times.append(elapsed)
-            path_lengths.append(plen)
-            print(f"{i+1:<10} | {'Success':<10} | {elapsed:<10.4f} | {plen:<10.4f}")
-            # plot_tree_and_path(env_map, planner.node_list, path)
-            # # 优化路径
-            # opt = PathOptimizer(env_map, safety_margin=0.5)
-
-            # # 第一步：把折线拉直
-            # path_pruned = opt.pruning_optimizer(path)
-
-            # # 第二步：把直角磨圆（带自动防碰撞修正）
-            # final_path_points = opt.smooth_optimizer(path_pruned)
-            # plot_tree_and_path(env_map, planner.node_list, final_path_points)
-            # optimal_length = calculate_path_length(final_path_points)
-            # print(f"    优化后路径长度: {optimal_length:.4f} 米")
+        env_first_times = []
+        env_final_times = []
+        env_iters = []
+        env_first_lengths = []
+        env_final_lengths = []
+        env_success_count = 0
+        for j in range(num_of_tests):
+            # 初始化 RRT*
+            rrt_star = RRTStar(
+                start=start, 
+                goal=goal, 
+                R_crash=r_agent_crash, 
+                R_risk=r_agent_risk, 
+                obstacle_list=obstacle_list, 
+                rand_area=[0, env_map["size"], env_map["z_size"]],  
+                expand_dis=50,    # 步长
+                max_iter=10000,    # 迭代次数
+                search_radius=120.0
+            )
+            start_time = time.time()
+            time_first, iteration_find_path, first_path, final_best_path = rrt_star.planning()
+            end_time = time.time()
             
-
-        else:
-            print(f"{i+1:<10} | {'Failed':<10} | {elapsed:<10.4f} | {'N/A':<10}")
-
+            time_final = end_time - start_time
+            
+            if final_best_path:
+                plen_first = calculate_path_length(first_path)
+                plen_final = calculate_path_length(final_best_path)
+                env_first_times.append(time_first)
+                env_final_times.append(time_final)
+                env_iters.append(iteration_find_path)
+                env_first_lengths.append(plen_first)
+                env_final_lengths.append(plen_final)
+                env_success_count += 1
+                print(f"{i+1:<4} | {'Success':<7} | {iteration_find_path:<6} | {time_first:<11.4f} | {plen_first:<12.1f} | {time_final:<10.4f} | {plen_final:<10.1f}")
+                # plot_tree_and_path(env_map, rrt_star.node_list, final_best_path)
+            else:
+                print(f"{i+1:<4} | {'Failed':<7} | {'N/A':<6} | {'N/A':<11} | {'N/A':<12} | {'N/A':<10} | {'N/A':<10}")
+        
+        env_success_rate = env_success_count / num_of_tests * 100
+        env_avg_time_first = sum(env_first_times) / len(env_first_times) if env_first_times else 0
+        env_avg_time_final = sum(env_final_times) / len(env_final_times) if env_final_times else 0
+        env_avg_iters = sum(env_iters) / len(env_iters) if env_iters else 0
+        env_avg_length_first = sum(env_first_lengths) / len(env_first_lengths) if env_first_lengths else 0
+        env_avg_length_final = sum(env_final_lengths) / len(env_final_lengths) if env_final_lengths else 0
+        
+        env_results.append({
+            'env_id': i+1,
+            'success_rate': env_success_rate,
+            'avg_time_first': env_avg_time_first,
+            'avg_time_final': env_avg_time_final,
+            'avg_iters': env_avg_iters,
+            'avg_length_first': env_avg_length_first,
+            'avg_length_final': env_avg_length_final
+        })        
+        print("-" * 80)
+            
     # 4. 计算平均值
-    print("-" * 50)
-    if success_times:
-        avg_time = sum(success_times) / len(success_times)
-        avg_len = sum(path_lengths) / len(path_lengths)
-        print(f"测试完成。")
-        print(f"成功率: {len(success_times)}/10")
-        print(f"平均运行时间: {avg_time:.4f} 秒")
-        print(f"平均路径长度: {avg_len:.4f} 米")
-    else:
-        print("所有任务均失败，请调整参数（如增加 max_iter 或减小 expand_dis）。")
+    print("=" * 80)
+    print(f"{'Task':<4} | {'Rate(%)':<4} | {'Iter':<6} | {'Time_first':<6}  | {'Length_first':<6} | {'Time_final':<6} | {'Length_final':<6}")
+    print("-" * 80)
+
+    for res in env_results:
+        print(f"{res['env_id']:<4} | {res['success_rate']:<7.1f} | {res['avg_iters']:<6.1f} | {res['avg_time_first']:<11.4f} | {res['avg_length_first']:<12.1f} | {res['avg_time_final']:<10.4f} | {res['avg_length_final']:<10.1f}")
+
+    print("-" * 80)

@@ -6,7 +6,6 @@ import time
 from mpl_toolkits.mplot3d import Axes3D
 from env_generator import env_generator
 from res_show import plot_map, plot_tree_and_path
-from path_optimizer import PathOptimizer
 
 # 定义 Node 类，用于表示树中的每个节点
 class Node:
