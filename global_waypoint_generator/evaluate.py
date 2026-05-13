@@ -494,7 +494,7 @@ def evaluate_B(model_B_path, model_A_path, data_dir, map_dim, cluster_eps=0.02, 
     model_A.eval()
 
     print("加载 Model B (航路点精测网络)...")
-    model_B = get_model(num_classes=1, input_dim=real_input_dim, blocks=[2,3,4,3]).to(device) # 💡 输入维度 +1
+    model_B = get_model(num_classes=1, input_dim=real_input_dim, blocks=[2,4,2,2], stride=[1,4,2,2], share_planes=16).to(device) # 💡 输入维度 +1
     model_B.load_state_dict(torch.load(model_B_path, map_location=device))
     model_B.eval()
 

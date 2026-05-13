@@ -417,7 +417,7 @@ class PointTransformerBlock(nn.Module):
 #         return x
 
 class PointTransformerSeg(nn.Module):
-    def __init__(self, block, blocks=[2, 3, 3, 2], c=6, k=13, dropout_p=0):
+    def __init__(self, block, blocks=[2, 3, 3, 2], stride=None, nsample=None, share_planes=None, c=6, k=13, dropout_p=0):
         super().__init__()
         self.c = c
         self.num_stages = len(blocks)
@@ -426,13 +426,17 @@ class PointTransformerSeg(nn.Module):
         # 维度以 32 起步，每次翻倍: [32, 64, 128, 256, 512, ...]
         planes = [32 * (2 ** i) for i in range(self.num_stages)] 
         # 步长: 第一层为 1，后续全是 4
-        stride = [1] + [4] * (self.num_stages - 1)
+        if stride is None:
+            stride = [1] + [4] * (self.num_stages - 1)
+        
         # 采样数: 第一层为 8，后续全是 16
-        nsample = [8] + [16] * (self.num_stages - 1)
+        if nsample is None: 
+            nsample = [8] + [16] * (self.num_stages - 1)
+        
         
         self.in_planes = c
-        share_planes = 8
-        
+        if share_planes is None:
+            share_planes = 8
         # ==========================================
         # 💡 2. 动态构建 Encoder (使用 nn.ModuleList)
         # ==========================================
@@ -519,7 +523,7 @@ class PointTransformerSeg(nn.Module):
 # ==========================================
 
 class get_model(nn.Module):
-    def __init__(self, num_classes, input_dim=8, dropout_p=0, blocks=[2, 3, 4, 6, 3]):
+    def __init__(self, num_classes, input_dim=8, dropout_p=0, blocks=[2, 3, 4, 6, 3], stride=None, nsample=None, share_planes=None):
         super(get_model, self).__init__()
         self.input_dim = input_dim
         self.backbone = PointTransformerSeg(

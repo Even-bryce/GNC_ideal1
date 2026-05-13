@@ -1837,7 +1837,7 @@ def save_sample6(
     xyz_norm = (xyz - center) / (scale + eps)
     
     d_obs = np.array([get_min_distance_to_obstacles(p, obstacles) for p in xyz], dtype=np.float32)
-    d_obs_norm = d_obs / (scale + eps)
+    d_obs_norm = torch.clamp(d_obs / (50.0 + eps), max=1.0)
 
     obs_normals = np.array([get_nearest_obstacle_normal(p, obstacles) for p in xyz], dtype=np.float32)
     
@@ -1995,7 +1995,7 @@ if __name__ == '__main__':
     BASE_SEED = 39         # 基础随机种子
     
     # 保存路径
-    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data15"
+    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data16"
     
     # RRT* 参数
     R_AGENT_CRASH = 1.2
@@ -2018,16 +2018,25 @@ if __name__ == '__main__':
         print(f"\n[{map_id+1}/{NUM_MAPS}] 正在生成第 {map_id} 号地图 (Seed={current_seed})...")
         
         # 1. 生成地图
-        env_map=env_generator_cluster(
-            map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
-            num_clusters=20,             # 建议 10~15 之间，保证有足够空间
-            chain_length_range=(1, 4),   # 每个簇的圆柱体数量
-            r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
-            r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
-            r_risk_range=(10, 20),       # 风险半径偏移量
-            zmax_range=(240, 240),
-            min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
-            seed=BASE_SEED,
+        # env_map=env_generator_cluster(
+        #     map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
+        #     num_clusters=20,             # 建议 10~15 之间，保证有足够空间
+        #     chain_length_range=(1, 4),   # 每个簇的圆柱体数量
+        #     r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
+        #     r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
+        #     r_risk_range=(10, 20),       # 风险半径偏移量
+        #     zmax_range=(240, 240),
+        #     min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
+        #     seed=BASE_SEED,
+        # )
+        env_map = env_generator(
+            rho=random.uniform(0.4, 0.5),   # 数据更丰富不容易出现过拟合
+            map_dim=(1500, 1500, 240),
+            r_crash_range=(30, 50),
+            r_risk_range=(3, 7),
+            zmax_range=(30, 240),
+            max_iter=5000,
+            seed=BASE_SEED
         )
         obstacle_list = env_map["obstacles"]
         print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。开始执行 RRT* 与质量筛选...")

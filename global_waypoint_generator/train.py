@@ -24,7 +24,7 @@ DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data15"
 START_EPOCH = 1  # 如果从头训练填 1；如果调参直接从第 41 轮开始，填 41
 PRETRAINED_CKPT = r"C:\Users\Administrator\Desktop\experiments\checkpoints\ckpt_epoch_40.pth" # 填入你第40轮保存的权重路径
 
-TRAIN_STAGE = "A"  # 可选: "A" (训练管道) 或 "B" (训练航路点)
+TRAIN_STAGE = "B"  # 可选: "A" (训练管道) 或 "B" (训练航路点)
 MODEL_A_CKPT = r"C:\Users\Administrator\Desktop\experiments\checkpoints\Stage_A\best_model.pth" # 阶段 B 需要用到 A 的权重
 
 GAMMA = 2
@@ -244,7 +244,7 @@ def train_one_epoch_B(model_B, model_A, loader, criterion, optimizer, device, ep
             
         # 2. 完美拼接！在通道维度 (dim=1) 把 9 个特征和 1 个概率拼起来
         points_with_prior = torch.cat([points, probs_A], dim=1) # 得到 [B, 10, N]
-        points_with_prior = points
+        points_with_prior = torch.cat([points[:,:5,:],points_with_prior[:,-3:,:]],dim=1)
 
         # ------------------------------------------
         # 开始训练 Model B
@@ -392,6 +392,10 @@ def validate_B(model_B, model_A, loader, criterion, device, tube_thresh=0.4):
     total_loss = 0.0
     processed_batches = 0
 
+    # --- 用于存放验证集检测指标的列表 ---
+    neg_max_probs, neg_fpr_list = [], []
+    se_mean_probs, mid_mean_probs, mid_fnr_list = [], [], []
+
     # 💡 验证阶段全程不需要计算梯度，极大节省显存并加速
     with torch.no_grad():
         for points, targets, valid_mask, gt_waypoints_list in loader:
@@ -420,19 +424,15 @@ def validate_B(model_B, model_A, loader, criterion, device, tube_thresh=0.4):
                 continue
 
             # 💡 4. 特征拼接 (对齐维度拼接)
-            # 1. 确保 probs_A 形状为 [B, 1, N]
             if probs_A.dim() == 3:
-                # 如果是 [B, N, 1]，则转置为 [B, 1, N]
                 if probs_A.shape[1] != 1:
                     probs_A = probs_A.permute(0, 2, 1)
             elif probs_A.dim() == 2:
-                # 如果是 [B, N]，则增加维度变为 [B, 1, N]
                 probs_A = probs_A.unsqueeze(1)
             
-            # 2. 在通道轴 (dim=1) 拼接，得到 [B, 10, N]
-            # 注意：千万不要用 dim=-1，因为你的 points 已经是 [B, C, N] 格式了
+            # 特征消融：拼接前 5 个特征和最后 3 个特征（带先验）
             points_with_prior = torch.cat([points, probs_A], dim=1)
-            points_with_prior = points
+            points_with_prior = torch.cat([points[:, :5, :], points_with_prior[:, -3:, :]], dim=1)
 
             # 💡 5. 传入联合掩码和新特征给 Model B
             output_B = model_B(points_with_prior, mask=combined_mask)
@@ -443,7 +443,54 @@ def validate_B(model_B, model_A, loader, criterion, device, tube_thresh=0.4):
             total_loss += loss.item()
             processed_batches += 1
 
-    return total_loss / max(processed_batches, 1)
+            # ==========================================
+            # 💡 7. 简洁检测指标统计 (Probs, FPR, FNR)
+            # ==========================================
+            probs_B = torch.sigmoid(logits_B)
+            if probs_B.dim() == 3: probs_B = probs_B.squeeze()
+            if targets_wp.dim() == 3: targets_wp = targets_wp.squeeze()
+
+            # 负样本统计 (< 0.1)
+            neg_mask = (targets_wp < 0.1) & combined_mask 
+            if neg_mask.sum() > 0:
+                neg_probs = probs_B[neg_mask]
+                neg_max_probs.append(neg_probs.max().item())
+                num_false_pos = (neg_probs > 0.5).float().sum()
+                fpr = num_false_pos / neg_probs.numel()
+                neg_fpr_list.append(fpr.item())
+
+            # 正样本统计 (> 0.8)
+            pos_mask = (targets_wp > 0.8) & combined_mask
+            if points.shape[1] >= 5:  
+                f_start = points[:, 3, :]  
+                f_goal  = points[:, 4, :]
+                is_start_end = (f_start > 0.95) | (f_goal > 0.95)
+                
+                mask_SE = pos_mask & is_start_end       
+                mask_MID = pos_mask & (~is_start_end)   
+
+                if mask_SE.sum() > 0:
+                    se_mean_probs.append(probs_B[mask_SE].mean().item())
+                if mask_MID.sum() > 0:
+                    mid_probs = probs_B[mask_MID]
+                    mid_mean_probs.append(mid_probs.mean().item())
+                    num_false_neg = (mid_probs < 0.5).float().sum()
+                    fnr = num_false_neg / mid_probs.numel()
+                    mid_fnr_list.append(fnr.item())
+
+    # --- 均值计算与简洁打印 ---
+    avg_loss = total_loss / max(processed_batches, 1)
+    
+    avg_neg_max = np.mean(neg_max_probs) if len(neg_max_probs) > 0 else 0.0
+    avg_fpr = np.mean(neg_fpr_list) if len(neg_fpr_list) > 0 else 0.0
+    avg_se_mean = np.mean(se_mean_probs) if len(se_mean_probs) > 0 else 0.0
+    avg_mid_mean = np.mean(mid_mean_probs) if len(mid_mean_probs) > 0 else 0.0
+    avg_mid_fnr = np.mean(mid_fnr_list) if len(mid_fnr_list) > 0 else 0.0  
+    
+    print(f"[Validation B] : "
+          f"SE:{avg_se_mean:.3f} | Mid:{avg_mid_mean:.3f} | NegMax:{avg_neg_max:.3f} | FPR:{avg_fpr:.4f} | FNR:{avg_mid_fnr:.4f}") 
+
+    return avg_loss
 
 def plot_loss_curve(train_loss, val_loss, save_dir):
     epochs = range(1, len(train_loss) + 1)
@@ -595,7 +642,8 @@ def main():
             
         # 💡 2. 实例化 Model B (核心：输入维度 + 1，因为拼接了 P_tube)
         # 注意：这里你可以把 dropout 调高一点，防止在小规模正样本上过拟合
-        model_B = get_model(num_classes=1, input_dim=real_input_dim, dropout_p=0.0, blocks=[2,3,4,3]).to(device)
+        # 测试发现share_planes比较大时效果更好，stride保证最终下采样层的点数在32-128区间，nsample貌似没有什么影响
+        model_B = get_model(num_classes=1, input_dim=8, dropout_p=0.1, blocks=[2,4,2,2], stride=[1,4,2,2], nsample=[8,16,16,16], share_planes=16).to(device)
         print(f"[*] 🚀 Model B 已初始化，输入特征维度已自动扩展至: {real_input_dim + 1}")
 
         # 💡 3. Model B 专属的 loss
@@ -606,7 +654,7 @@ def main():
                             w_safety=0.0,
                             w_conn=0.0,
                             w_cost=0.0,
-                            alpha=0.6,
+                            alpha=0.9,
                             gamma=2.0,
                             delta_s=0.7,
                             delta_d=0.2,
@@ -639,7 +687,7 @@ def main():
                 optimizer=optimizer_B, 
                 device=device, 
                 epoch_idx=epoch, 
-                tube_thresh=0.5 # 宽容截流阈值
+                tube_thresh=0.4 # 宽容截流阈值
             )
             
             # 💡 调用专属的 validate_B
@@ -649,7 +697,7 @@ def main():
                 loader=val_loader, 
                 criterion=criterion_B, 
                 device=device,
-                tube_thresh=0.5
+                tube_thresh=0.4
             )
             
             scheduler_B.step()
