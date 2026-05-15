@@ -1837,7 +1837,7 @@ def save_sample6(
     xyz_norm = (xyz - center) / (scale + eps)
     
     d_obs = np.array([get_min_distance_to_obstacles(p, obstacles) for p in xyz], dtype=np.float32)
-    d_obs_norm = torch.clamp(d_obs / (50.0 + eps), max=1.0)
+    d_obs_norm = np.clip(d_obs / (50.0 + eps), 0.0, 1.0)
 
     obs_normals = np.array([get_nearest_obstacle_normal(p, obstacles) for p in xyz], dtype=np.float32)
     
