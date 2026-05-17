@@ -56,18 +56,26 @@ def plot_tree_and_path(env_map, node_list=None, path=None, waypoint_list=None):
                      color='orange', alpha=0.8, wireframe=True, resolution=20)
         
     # # RRT树
-    # if node_list is not None and len(node_list) > 1:
-    #     segments = []
-    #     for node in node_list:
-    #         if node.parent:
+    # all_segments = []
+    # for seg_idx, tree_nodes in enumerate(node_list):
+    #     if not tree_nodes or len(tree_nodes) < 2:
+    #         continue
+    #     seg_segments = []
+    #     for node in tree_nodes:
+    #         if node.parent is not None:
     #             p_start = [node.x, node.y, node.z]
     #             p_end   = [node.parent.x, node.parent.y, node.parent.z]
-    #             segments.append([p_start, p_end])
-    #     if segments:
-    #         segments = np.array(segments, dtype=float)
-    #         # 使用 Line3DCollection 批量添加，效率高
-    #         tree_collection = Line3DCollection(segments, colors='lime', linewidth=0.5, alpha=0.5)
-    #         ax.add_collection3d(tree_collection)
+    #             seg_segments.append([p_start, p_end])
+    #     if seg_segments:
+    #         all_segments.extend(seg_segments)   # 或者按航段分别添加，便于不同颜色
+    
+    # if not all_segments:
+    #     return
+    
+    # segments_array = np.array(all_segments, dtype=float)
+    # # 可依据需要为每个航段单独设置颜色：colors=color_list[seg_idx]
+    # tree_collection = Line3DCollection(segments_array, colors='lime', linewidth=0.5, alpha=0.5)
+    # ax.add_collection3d(tree_collection)
 
     # 最终路径
     if path is not None:

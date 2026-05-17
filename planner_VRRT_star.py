@@ -102,12 +102,12 @@ class VRRT_star:
                     # 未找到路径时，检查是否可直接连接到目标节点
                     if not first_path_found[j] and goal_collision_results[j] and self.calc_distance(new_node, goal_nodes_list[j]) < 10 * self.expand_dis:
                         first_path_found[j] = True
+                        goal_nodes_list[j].parent = new_node
+                        self.nodes_list[j].append(goal_nodes_list[j])
                         elapsed = time.time() - start_time
                         time_first_list[j] = elapsed
                         # 生成路径
-                        first_path[j] = self.generate_final_path_from_node(new_nodes_list[j])
-                        # 补充终点
-                        first_path[j].append([goal_nodes_list[j].x, goal_nodes_list[j].y, goal_nodes_list[j].z])
+                        first_path[j] = self.generate_final_path_from_node(goal_nodes_list[j])
                         path_length_list[j] = calculate_path_length(first_path[j])
                         
                         # 首次找到路径的迭代轮数与时间
@@ -533,7 +533,7 @@ if __name__ == '__main__':
     env_results = []
     
     # 规划次数
-    num_of_tests = 50
+    num_of_tests = 2
     # 测评指标
     success_count = 0
     total_time_first = []      # 首次找到路径的总耗时
@@ -552,8 +552,8 @@ if __name__ == '__main__':
             R_crash=r_agent_crash, 
             R_risk=r_agent_risk, 
             obstacle_list=obstacle_list, 
-            expand_dis=20,
-            search_radius=110,
+            expand_dis=3,
+            search_radius=30,
             max_iter=10000
         )
         start_time = time.time()
