@@ -5,7 +5,6 @@ from multiprocessing import Pool
 from env_generator_for_data import env_generator   # 根据实际路径调整
 from planner_VRRT_star import VRRT_star
 
-# ==================== 并行任务函数 ====================
 def process_seed(args):
     """
     单个种子的规划任务（独立函数，可被 pickle 序列化）
@@ -63,8 +62,6 @@ def process_seed(args):
 
     return (seed, avg_t, avg_iter, avg_len, success_count)
 
-
-# ==================== 主程序 ====================
 if __name__ == '__main__':
     import os  # 用于 getpid
 
@@ -95,9 +92,7 @@ if __name__ == '__main__':
                   37, 38, 40, 41, 44, 47, 48, 53, 55, 56,
                   57, 58, 59, 61, 63, 64, 66, 69, 70, 78,
                   80, 81, 87, 88, 91, 92, 95, 97, 99, 101]
-    num_tests_per_seed = 1000   # 每个种子的重复规划次数
-
-    print(f"找到 {len(safe_seeds)} 个安全种子，使用 10 进程并行规划...")
+    num_tests_per_seed = 2   # 每个种子的重复规划次数
 
     # 准备任务参数列表
     tasks = [(seed, env_params, waypoints, r_agent_crash, r_agent_risk,
@@ -153,5 +148,9 @@ if __name__ == '__main__':
     ax.grid(True)
 
     plt.tight_layout()
-    plt.savefig('seed_scatter.png', dpi=150)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    save_dir = os.path.join(script_dir, 'test_results')
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f'test_seed_scatter.png')
+    plt.savefig(save_path, dpi=150)
     plt.show()

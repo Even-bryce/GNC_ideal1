@@ -6,7 +6,6 @@ import time
 from mpl_toolkits.mplot3d import Axes3D
 from env_generator_for_data import env_generator
 from res_show import plot_map_and_waypoint, plot_tree_and_path
-from utils import plot_running_averages
 
 # 定义 Node 类，用于表示树中的每个节点
 class Node:
@@ -451,8 +450,3 @@ if __name__ == '__main__':
         print("所有任务均失败")
     print("=" * 30)
     
-    # plot_running_averages(data_list=[total_time_first, total_iter_needed, total_length_first],
-    # labels=['Total Time', 'Iterations', 'Path Length'],
-    # step=20,
-    # ylim_expand=0.3,
-    # save_dir='plots')
