@@ -824,6 +824,119 @@ def visualize_enriched_feature_distributions(npz_file_path, save_dir='./output_p
     print(f"✅ 10维特征密度分布图已成功保存至: {save_path}")
     plt.close(fig)
 
+def analyze_single_label_distribution(npz_file_path, target_channel=2, save_dir='./output_plots'):
+    """
+    精准剖析 npz 文件中【指定通道】的标签数值分布情况。
+    参数:
+    - target_channel: 想要查看的通道编号 (1 代表第一个通道，2 代表第二个通道)
+    """
+    print(f"\n" + "="*50)
+    print(f"📊 正在分析数据: {os.path.basename(npz_file_path)} | 目标通道: {target_channel}")
+    print("="*50)
+    
+    # 1. 加载数据
+    data = np.load(npz_file_path)
+    if 'labels' not in data:
+        print("❌ 错误：文件中未找到 'labels' 键！")
+        return
+        
+    labels = data['labels']  
+    
+    # 2. 鲁棒的维度处理
+    # 如果 labels 是一维的 [N]，强行转为 [N, 1] 以便统一处理
+    if len(labels.shape) == 1:
+        labels = labels.reshape(-1, 1)
+        
+    max_channels = labels.shape[1]
+    channel_idx = target_channel - 1  # 索引从 0 开始
+    
+    if channel_idx < 0 or channel_idx >= max_channels:
+        print(f"❌ 错误：请求的通道 {target_channel} 超出范围！该文件仅有 {max_channels} 个标签通道。")
+        return
+
+    # 提取目标通道数据
+    ch_data = labels[:, channel_idx]
+    total_points = len(ch_data)
+
+    # 3. 核心统计信息计算
+    print(f"\n>>> 通道 {target_channel} 统计信息 <<<")
+    print(f"  • 总点数: {total_points}")
+    print(f"  • 最小值: {np.min(ch_data):.4f} | 最大值: {np.max(ch_data):.4f} | 平均值: {np.mean(ch_data):.4f}")
+    
+    # 统计不同分数段的分布
+    num_zeros = np.sum(ch_data == 0)
+    num_ones = np.sum(ch_data == 1)
+    num_neg = np.sum(ch_data <= 0.1)
+    num_pos = np.sum(ch_data >= 0.8)
+    num_mid = np.sum((ch_data > 0.1) & (ch_data < 0.8))
+    
+    print(f"  • 绝对 0 的点数: {num_zeros} ({num_zeros/total_points*100:.2f}%)")
+    print(f"  • 绝对 1 的点数: {num_ones} ({num_ones/total_points*100:.2f}%)")
+    print(f"  • 背景点 (<= 0.1): {num_neg} ({num_neg/total_points*100:.2f}%)")
+    print(f"  • 航路点 (>= 0.8): {num_pos} ({num_pos/total_points*100:.2f}%)")
+    print(f"  • 模棱两可点 (0.1 ~ 0.8): {num_mid} ({num_mid/total_points*100:.2f}%)")
+    
+    # 计算正负样本不平衡比
+    if num_pos > 0:
+        imbalance_ratio = num_neg / num_pos
+        print(f"  🚨 正负样本不平衡比例 (<=0.1 vs >=0.8) ≈ 1 : {imbalance_ratio:.1f}")
+    else:
+        print("  🚨 警告: 未检测到得分 >= 0.8 的正样本！")
+
+    # 4. 绘制单通道概率密度直方图
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # 动态选择颜色
+    color_map = {1: '#FF5722', 2: '#03A9F4'}
+    plot_color = color_map.get(target_channel, '#4CAF50')
+
+    # ---------------------------------------------
+    # 图 1：线性频率分布 (Relative Frequency)
+    # 纵坐标是 0 到 1 之间的小数，代表该柱子内的点占总数的比例
+    # (注意：因为极度不平衡，高分区的柱子在这里可能几乎看不见)
+    # ---------------------------------------------
+    sns.histplot(
+        ch_data, 
+        bins=50, 
+        kde=False,  
+        stat='probability',  # 💡 核心修改：指定为频率 (概率比例)
+        color=plot_color, 
+        ax=axes[0]
+    )
+    axes[0].set_title(f"Label Frequency (Linear Scale)", fontsize=14)
+    axes[0].set_xlabel("Label Value (Score)", fontsize=12)
+    axes[0].set_ylabel("Frequency (Proportion)", fontsize=12)
+
+    # ---------------------------------------------
+    # 图 2：对数频率分布 (Log Frequency)
+    # 纵坐标依然是频率比例，但使用对数轴，让你能看清那些只占 0.01% 的正样本
+    # ---------------------------------------------
+    sns.histplot(
+        ch_data, 
+        bins=50, 
+        kde=False, 
+        stat='probability',  # 💡 同样指定为频率
+        color=plot_color, 
+        ax=axes[1]
+    )
+    axes[1].set_yscale('log')  # 开启对数放大镜
+    axes[1].set_title(f"Label Frequency (Log Scale - Zoom in)", fontsize=14)
+    axes[1].set_xlabel("Label Value (Score)", fontsize=12)
+    axes[1].set_ylabel("Frequency (Log Scale)", fontsize=12)
+
+    plt.suptitle(f"Label Frequency Analysis - Channel {target_channel}\n({os.path.basename(npz_file_path)})", fontsize=16, y=1.05)
+    plt.tight_layout()
+
+    # 5. 保存图片
+    os.makedirs(save_dir, exist_ok=True)
+    base_name = os.path.basename(npz_file_path).replace('.npz', '')
+    save_path = os.path.join(save_dir, f"{base_name}_label_Ch{target_channel}_dist.png")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"\n✅ 标签分布直方图已保存至: {save_path}")
+    print("="*50)
+
 # 调用测试
 if __name__ == "__main__":
     # # 基础路径配置
@@ -949,25 +1062,43 @@ if __name__ == "__main__":
     # print("="*50)
 
     # -------------------------------验证新数据的分布--------------------------------
-    enriched_data_dir = r"C:\Users\Administrator\Desktop\experiments\train_data16\enriched_all_stage_B"
-    save_directory = os.path.join(enriched_data_dir, "plots_check") 
+    # enriched_data_dir = r"C:\Users\Administrator\Desktop\experiments\train_data16\enriched_all_stage_B"
+    # save_directory = os.path.join(enriched_data_dir, "plots_check") 
     
-    # 获取所有的 .npz 文件
-    all_files = glob.glob(os.path.join(enriched_data_dir, "*.npz"))
+    # # 获取所有的 .npz 文件
+    # all_files = glob.glob(os.path.join(enriched_data_dir, "*.npz"))
+    
+    # if len(all_files) == 0:
+    #     print(f"❌ 错误: 在 {enriched_data_dir} 下没有找到任何文件！请确保增强脚本已成功运行。")
+    #     exit()
+
+    # # 随机抽取 5 个文件看看效果
+    # test_files = random.sample(all_files, min(20, len(all_files)))
+    
+    # print(f"🚀 开始随机抽检 {len(test_files)} 个增强版样本...")
+    # for i, sample_file in enumerate(test_files):
+    #     print("-" * 50)
+    #     print(f"[{i+1}/{len(test_files)}] 分析文件: {os.path.basename(sample_file)}")
+    #     visualize_enriched_feature_distributions(sample_file, save_directory)
+            
+    # print("-" * 50)
+    # print(f"✅ 增强特征检验完成！请前往 {save_directory} 查看合并后的特征大图。")
+
+    # -------------------------------单通道标签分布分析--------------------------------
+    data_dir = r"C:\Users\Administrator\Desktop\experiments\train_data16\enriched_all_stage_B"
+    save_directory = os.path.join(data_dir, "plots_labels") 
+    
+    # 💡 核心参数：你想看第几个通道？
+    # Model A 数据通常看 1，Model B 数据通常看 2
+    TARGET_CH = 2 
+    
+    all_files = glob.glob(os.path.join(data_dir, "*.npz"))
     
     if len(all_files) == 0:
-        print(f"❌ 错误: 在 {enriched_data_dir} 下没有找到任何文件！请确保增强脚本已成功运行。")
-        exit()
+        print(f"❌ 错误: 未在 {data_dir} 找到 npz 文件！")
+    else:
+        # 随机抽取 1 个文件查看
+        sample_file = all_files[0] 
+        analyze_single_label_distribution(sample_file, target_channel=TARGET_CH, save_dir=save_directory)
 
-    # 随机抽取 5 个文件看看效果
-    test_files = random.sample(all_files, min(20, len(all_files)))
-    
-    print(f"🚀 开始随机抽检 {len(test_files)} 个增强版样本...")
-    for i, sample_file in enumerate(test_files):
-        print("-" * 50)
-        print(f"[{i+1}/{len(test_files)}] 分析文件: {os.path.basename(sample_file)}")
-        visualize_enriched_feature_distributions(sample_file, save_directory)
-            
-    print("-" * 50)
-    print(f"✅ 增强特征检验完成！请前往 {save_directory} 查看合并后的特征大图。")
     

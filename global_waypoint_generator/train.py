@@ -731,8 +731,8 @@ def train_one_epoch_B_offline(model_B, loader, criterion, optimizer, device, epo
         # points_input = torch.cat([points[:, :3, :]], dim=1)
 
 
-        # 如果你想用前4个特征 + Model A的概率：
-        # points_input = torch.cat([points[:, :4, :], points[:, -1:, :]], dim=1)
+        # 消融前三个特征和后四个特征
+        points_input = torch.cat([points[:, :3, :], points[:, -4:, :]], dim=1)
 
         # ------------------------------------------
         # 开始训练 Model B (直接前向传播)
@@ -840,6 +840,7 @@ def validate_B_offline(model_B, loader, criterion, device):
             # --- 特征选择逻辑同 Train ---
             points_input = points 
             # points_input = torch.cat([points[:, :3, :]], dim=1) # 示例：仅取前四维特征
+            points_input = torch.cat([points[:, :3, :], points[:, -4:, :]], dim=1)
             
             # 直接推断
             output_B = model_B(points_input, mask=valid_mask)
@@ -855,7 +856,7 @@ def validate_B_offline(model_B, loader, criterion, device):
             if probs_B.dim() == 3: probs_B = probs_B.squeeze()
             if targets_wp.dim() == 3: targets_wp = targets_wp.squeeze()
 
-            # 负样本统计 (< 0.1)
+            # 负样本统计 (< 0.4)
             neg_mask = (targets_wp < 0.4) & valid_mask 
             if neg_mask.sum() > 0:
                 neg_probs = probs_B[neg_mask]
@@ -994,39 +995,39 @@ def main():
         print("="*50)
         
         # 💡 1. 实例化并绝对冻结 Model A
-        model_A = get_model(num_classes=1, input_dim=real_input_dim, dropout_p=0.2).to(device)
-        if os.path.exists(MODEL_A_CKPT):
-            # 1. 先把权重读取到内存字典中
-            checkpoint = torch.load(MODEL_A_CKPT, map_location=device)
-            new_state_dict = {}
+        # model_A = get_model(num_classes=1, input_dim=real_input_dim, dropout_p=0.2).to(device)
+        # if os.path.exists(MODEL_A_CKPT):
+        #     # 1. 先把权重读取到内存字典中
+        #     checkpoint = torch.load(MODEL_A_CKPT, map_location=device)
+        #     new_state_dict = {}
             
-            # 2. 遍历字典，翻译 Key 的名字
-            for k, v in checkpoint.items():
-                # 替换 Encoder 名称
-                if 'enc1.' in k: k = k.replace('enc1.', 'enc.0.')
-                elif 'enc2.' in k: k = k.replace('enc2.', 'enc.1.')
-                elif 'enc3.' in k: k = k.replace('enc3.', 'enc.2.')
-                elif 'enc4.' in k: k = k.replace('enc4.', 'enc.3.')
-                elif 'enc5.' in k: k = k.replace('enc5.', 'enc.4.')
+        #     # 2. 遍历字典，翻译 Key 的名字
+        #     for k, v in checkpoint.items():
+        #         # 替换 Encoder 名称
+        #         if 'enc1.' in k: k = k.replace('enc1.', 'enc.0.')
+        #         elif 'enc2.' in k: k = k.replace('enc2.', 'enc.1.')
+        #         elif 'enc3.' in k: k = k.replace('enc3.', 'enc.2.')
+        #         elif 'enc4.' in k: k = k.replace('enc4.', 'enc.3.')
+        #         elif 'enc5.' in k: k = k.replace('enc5.', 'enc.4.')
                 
-                # 替换 Decoder 名称
-                # 注意：我们在 __init__ 中是用 range(4, -1, -1) 倒序生成 dec 的
-                # 所以原来的 dec5 变成了现在的 dec.0，dec4 变成了 dec.1，以此类推
-                elif 'dec5.' in k: k = k.replace('dec5.', 'dec.0.')
-                elif 'dec4.' in k: k = k.replace('dec4.', 'dec.1.')
-                elif 'dec3.' in k: k = k.replace('dec3.', 'dec.2.')
-                elif 'dec2.' in k: k = k.replace('dec2.', 'dec.3.')
-                elif 'dec1.' in k: k = k.replace('dec1.', 'dec.4.')
+        #         # 替换 Decoder 名称
+        #         # 注意：我们在 __init__ 中是用 range(4, -1, -1) 倒序生成 dec 的
+        #         # 所以原来的 dec5 变成了现在的 dec.0，dec4 变成了 dec.1，以此类推
+        #         elif 'dec5.' in k: k = k.replace('dec5.', 'dec.0.')
+        #         elif 'dec4.' in k: k = k.replace('dec4.', 'dec.1.')
+        #         elif 'dec3.' in k: k = k.replace('dec3.', 'dec.2.')
+        #         elif 'dec2.' in k: k = k.replace('dec2.', 'dec.3.')
+        #         elif 'dec1.' in k: k = k.replace('dec1.', 'dec.4.')
                 
-                new_state_dict[k] = v
+        #         new_state_dict[k] = v
                 
-            # 3. 将翻译好的新字典喂给模型
-            model_A.load_state_dict(new_state_dict)
-            print(f"[*] ✅ 成功通过字典映射加载 Model A 管道先验权重!")
+        #     # 3. 将翻译好的新字典喂给模型
+        #     model_A.load_state_dict(new_state_dict)
+        #     print(f"[*] ✅ 成功通过字典映射加载 Model A 管道先验权重!")
             
-        model_A.eval() # 锁定 Dropout 和 BatchNorm
-        for param in model_A.parameters():
-            param.requires_grad = False # 彻底切断梯度，省下海量显存！
+        # model_A.eval() # 锁定 Dropout 和 BatchNorm
+        # for param in model_A.parameters():
+        #     param.requires_grad = False # 彻底切断梯度，省下海量显存！
             
         
         # =========================================================
@@ -1070,7 +1071,7 @@ def main():
         # 💡 2. 实例化 Model B (核心：输入维度 + 1，因为拼接了 P_tube)
         # 注意：这里你可以把 dropout 调高一点，防止在小规模正样本上过拟合
         # 测试发现share_planes比较大时效果更好，stride保证最终下采样层的点数在32-128区间，nsample貌似没有什么影响
-        model_B = get_model(num_classes=1, input_dim=10, dropout_p=0.1, blocks=[2,4,2], stride=[1,4,2], nsample=[8,16,16], share_planes=16).to(device)
+        model_B = get_model(num_classes=1, input_dim=7, dropout_p=0.1, blocks=[1,2,2], stride=[1,2,2], nsample=[8,8,8], share_planes=16).to(device)
         print(f"[*] 🚀 Model B 已初始化，输入特征维度已自动扩展至: {real_input_dim + 1}")
 
         # 💡 3. Model B 专属的 loss
