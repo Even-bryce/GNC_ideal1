@@ -2318,6 +2318,278 @@ def save_sample7(
         plot_sample_scores(xyz, raw_labels[:,0:1], best_path, waypoints, extracted_wps_physical, env_map["map_dim"])
         plot_sample_scores(xyz, labels, best_path, waypoints, extracted_wps_physical, env_map["map_dim"])
 
+def save_sample8(
+    env_map,
+    file_path,
+    best_path,      # [K, 3] 真实最优路径的一系列点 (密集)
+    waypoints,      # [M, 3] 真实路径的关键航路点 (稀疏，包含起点和终点)
+    N_attempts=4096,
+    alpha=1.0,      # 路径基础分权重
+    sigma1=0.05,    # 路段宽度 (此时代表占地图比例，如 0.05 代表 5% 的地图跨度)
+    sigma2=0.02,    # 关键点精度 (同上)
+    eps=1e-8,
+    visualize=False
+):
+    """
+    生成并保存一个训练样本 (.npz) - 异向高斯自适应版本
+    特征更新: 取消法向量特征，替换为最近障碍物的5个圆柱参数 (r, ox, oy, zmin, zmax) 并进行归一化。
+    """
+    
+    # ==========================================
+    # 内部辅助函数
+    # ==========================================
+    def extract_waypoints(points, scores, eps=0.15, peak_radius=0.15, z_weight=1.0):
+        if len(points) == 0:
+            return np.empty((0, 3))
+
+        # Z方向加权
+        points_scaled = points.copy()
+        points_scaled[:, 2] *= z_weight
+
+        # 局部极大值 (寻找峰值候选点)
+        tree = KDTree(points_scaled)
+        peaks = []
+        peak_scores = []
+
+        for i, p in enumerate(points_scaled):
+            idx = tree.query_ball_point(p, r=peak_radius)
+            is_peak = True
+            for j in idx:
+                if scores[j] > scores[i]:
+                    is_peak = False
+                    break
+            if is_peak:
+                peaks.append(points[i])
+                peak_scores.append(scores[i])
+
+        if len(peaks) == 0:
+            return np.empty((0, 3))
+
+        peaks = np.array(peaks)
+        peak_scores = np.array(peak_scores)
+
+        # DBSCAN 聚类
+        peaks_scaled = peaks.copy()
+        peaks_scaled[:, 2] *= z_weight
+
+        clustering = DBSCAN(eps=eps, min_samples=1).fit(peaks_scaled)
+        labels = clustering.labels_
+
+        waypoints = []
+        for label in set(labels):
+            if label == -1:
+                continue
+            mask = (labels == label)
+            cluster_points = peaks[mask]
+            cluster_scores = peak_scores[mask]
+            best_idx = np.argmax(cluster_scores)
+            waypoints.append(cluster_points[best_idx])
+
+        return np.array(waypoints)
+
+    def check_collision(point, obstacles):
+        px, py, pz = point
+        for (ox, oy, zmin, zmax, r_crash, _) in obstacles:
+            if zmin <= pz <= zmax:
+                if (px - ox)**2 + (py - oy)**2 <= r_crash**2:
+                    return True
+        return False
+
+    def get_min_distance_to_obstacles(point, obstacles):
+        px, py, pz = point
+        min_dist = float('inf')
+        for (ox, oy, zmin, zmax, r_crash, _) in obstacles:
+            d_hor = np.sqrt((px - ox)**2 + (py - oy)**2) - r_crash
+            if pz > zmax: d_ver = pz - zmax
+            elif pz < zmin: d_ver = zmin - pz
+            else: d_ver = 0.0
+
+            if d_hor > 0 and d_ver == 0: dist = d_hor
+            elif d_hor <= 0 and d_ver > 0: dist = d_ver
+            elif d_hor > 0 and d_ver > 0: dist = np.sqrt(d_hor**2 + d_ver**2)
+            else: dist = 0.0 
+            
+            if dist < min_dist: min_dist = dist
+        return min_dist
+
+    # 新增：获取最近障碍物的圆柱参数
+    def get_nearest_obstacle_params(point, obstacles):
+        px, py, pz = point
+        min_dist = float('inf')
+        best_obs_params = [0.0, 0.0, 0.0, 0.0, 0.0]  # ox, oy, zmin, zmax, r_crash
+
+        for (ox, oy, zmin, zmax, r_crash, _) in obstacles:
+            d_hor = np.sqrt((px - ox)**2 + (py - oy)**2) - r_crash
+            if pz > zmax: d_ver = pz - zmax
+            elif pz < zmin: d_ver = zmin - pz
+            else: d_ver = 0.0
+
+            if d_hor > 0 and d_ver == 0: dist = d_hor
+            elif d_hor <= 0 and d_ver > 0: dist = d_ver
+            elif d_hor > 0 and d_ver > 0: dist = np.sqrt(d_hor**2 + d_ver**2)
+            else: dist = 0.0 
+            
+            if dist < min_dist:
+                min_dist = dist
+                best_obs_params = [ox, oy, zmin, zmax, r_crash]
+                
+        return best_obs_params
+
+    def point_to_segment_distance(P, A, B):
+        AB = B - A
+        AP = P - A
+        ab_sq = np.dot(AB, AB) + eps
+        t = np.dot(AP, AB) / ab_sq
+        t = np.clip(t, 0.0, 1.0)
+        Proj = A + t[:, np.newaxis] * AB
+        return np.linalg.norm(P - Proj, axis=1)
+
+    # ==========================================
+    # 1. 预处理输入数据
+    # ==========================================
+    path_arr = np.asarray(best_path, dtype=np.float32)   
+    wp_arr   = np.asarray(waypoints, dtype=np.float32)   
+    
+    S = wp_arr[0]
+    G = wp_arr[-1]
+    
+    Lx, Ly, Lz = env_map["map_dim"]
+    xyz_min = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    xyz_max = np.array([Lx, Ly, Lz], dtype=np.float32)
+    obstacles = env_map["obstacles"]
+    
+    center = 0.5 * (xyz_min + xyz_max)
+    scale = max(Lx, Ly, Lz)
+
+    # ==========================================
+    # 2. 批量采样 (One-Pass)
+    # ==========================================
+    candidates = np.random.uniform(xyz_min, xyz_max, size=(N_attempts, 3))
+    valid_pts = []
+    
+    for p in candidates:
+        if not check_collision(p, obstacles):
+            valid_pts.append(p)
+
+    if len(valid_pts) == 0:
+        pts = wp_arr.copy()
+    else:
+        pts = np.asarray(valid_pts, dtype=np.float32)
+
+    # ==========================================
+    # 3. 组合最终点集
+    # ==========================================
+    xyz = np.vstack([S[None], G[None], pts]) 
+    N_real = xyz.shape[0]
+
+    # ==========================================
+    # 4. 构建输入特征 (Input Features) - 更新圆柱参数特征
+    # ==========================================
+    xyz_norm = (xyz - center) / (scale + eps)
+    
+    d_obs = np.array([get_min_distance_to_obstacles(p, obstacles) for p in xyz], dtype=np.float32)
+    d_obs_norm = d_obs / (scale + eps)
+    d_obs_norm = np.clip(d_obs_norm*5, 0.0, 1.0)
+
+    # 获取最近障碍物的参数: [ox, oy, zmin, zmax, r_crash]
+    nearest_obs_params = np.array([get_nearest_obstacle_params(p, obstacles) for p in xyz], dtype=np.float32)
+    
+    # 提取并独立归一化参数
+    ox = nearest_obs_params[:, 0]
+    oy = nearest_obs_params[:, 1]
+    zmin_obs = nearest_obs_params[:, 2]
+    zmax_obs = nearest_obs_params[:, 3]
+    r_crash = nearest_obs_params[:, 4]
+
+    # 特征归一化
+    r_norm = r_crash / 200.0
+    ox_norm = (ox - center[0]) / (scale + eps)
+    oy_norm = (oy - center[1]) / (scale + eps)
+    zmin_norm = zmin_obs / 240.0
+    zmax_norm = zmax_obs / 240.0
+    
+    d_s = np.linalg.norm(xyz - S[None], axis=1)
+    d_g = np.linalg.norm(xyz - G[None], axis=1)
+    denom = d_s + d_g + eps
+    f_start = d_g / denom
+    f_goal  = d_s / denom
+    
+    # 拼接新的特征矩阵，总维度：11维 (3 + 2 + 1 + 5)
+    points = np.stack([
+        xyz_norm[:, 0], xyz_norm[:, 1], xyz_norm[:, 2],  # Index 0, 1, 2: 点坐标
+        f_start, f_goal,                                 # Index 3, 4: 起终点引导特征
+        d_obs_norm,                                      # Index 5: 最近障碍物距离
+        r_norm,                                          # Index 6: 最近圆柱半径 (除以 150)
+        ox_norm, oy_norm,                                # Index 7, 8: 最近圆柱中心 XY (scale, center 归一化)
+        zmin_norm, zmax_norm                             # Index 9, 10: 最近圆柱 Z 范围 (除以 240)
+    ], axis=1).astype(np.float32)
+
+    # ==========================================
+    # 5. 标签计算 (Label Generation) - 异向高斯
+    # ==========================================
+    labels = np.zeros((N_real, 1), dtype=np.float32)
+    
+    dim_scale = np.array([Lx, Ly, Lz], dtype=np.float32) + eps
+    
+    xyz_ratio = xyz / dim_scale
+    wp_ratio = wp_arr / dim_scale
+    path_ratio = path_arr / dim_scale
+    
+    mid_wps_ratio = wp_ratio[1:-1]
+    if len(mid_wps_ratio) > 0:
+        dists_to_mid_wps = np.linalg.norm(xyz_ratio[:, None, :] - mid_wps_ratio[None, :, :], axis=2)
+        d_point_ratio = np.min(dists_to_mid_wps, axis=1)
+        y_point = 1.0 * np.exp(- (d_point_ratio ** 2) / (2 * sigma2**2))
+    else:
+        y_point = np.zeros(N_real, dtype=np.float32)
+
+    d_line_ratio = np.full(N_real, float('inf'), dtype=np.float32)
+    for k in range(len(path_ratio) - 1):
+        A_ratio = path_ratio[k]
+        B_ratio = path_ratio[k+1]
+        d_segment = point_to_segment_distance(xyz_ratio, A_ratio, B_ratio)
+        d_line_ratio = np.minimum(d_line_ratio, d_segment)
+
+    y_line = alpha * np.exp(- (d_line_ratio ** 2) / (2 * sigma1**2))
+    
+    labels[:, 0] = np.maximum(y_line, y_point)
+    labels[0, 0] = 1.0 
+    labels[1, 0] = 1.0
+
+    # ==========================================
+    # 6. 保存
+    # ==========================================
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    np.savez(file_path, points=points, labels=labels, waypoints=wp_arr)
+    
+    if visualize:
+        print(f"[Visualizing] Plotting scores and testing extraction for {file_path}...")
+        
+        mask = labels[:, 0] > 0.7
+        high_score_xyz = xyz[mask]
+        high_score_labels = labels[mask, 0]
+        
+        if len(high_score_xyz) > 0:
+            high_score_ratio = high_score_xyz / dim_scale
+            
+            extracted_wps_ratio = extract_waypoints(
+                points=high_score_ratio, 
+                scores=high_score_labels, 
+                eps=0.15,        
+                peak_radius=0.15,        
+                z_weight=1.0             
+            )
+            
+            if len(extracted_wps_ratio) > 0:
+                extracted_wps_physical = extracted_wps_ratio * dim_scale
+            else:
+                extracted_wps_physical = np.empty((0, 3))
+        else:
+            extracted_wps_physical = np.empty((0, 3))
+            
+        # 传递给统一的绘图函数
+        plot_sample_scores(xyz, labels, best_path, waypoints, extracted_wps_physical, env_map["map_dim"])
+
 
 
 def is_path_meaningful(waypoints, min_angle_deg=15.0):
@@ -2370,7 +2642,7 @@ if __name__ == '__main__':
     BASE_SEED = 39         # 基础随机种子
     
     # 保存路径
-    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data17"
+    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data63"
     
     # RRT* 参数
     R_AGENT_CRASH = 1.2
@@ -2393,26 +2665,26 @@ if __name__ == '__main__':
         print(f"\n[{map_id+1}/{NUM_MAPS}] 正在生成第 {map_id} 号地图 (Seed={current_seed})...")
         
         # 1. 生成地图
-        # env_map=env_generator_cluster(
-        #     map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
-        #     num_clusters=20,             # 建议 10~15 之间，保证有足够空间
-        #     chain_length_range=(1, 4),   # 每个簇的圆柱体数量
-        #     r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
-        #     r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
-        #     r_risk_range=(10, 20),       # 风险半径偏移量
-        #     zmax_range=(240, 240),
-        #     min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
-        #     seed=BASE_SEED,
-        # )
-        env_map = env_generator(
-            rho=random.uniform(0.4, 0.5),   # 数据更丰富不容易出现过拟合
-            map_dim=(1500, 1500, 240),
-            r_crash_range=(30, 50),
-            r_risk_range=(3, 7),
-            zmax_range=(30, 240),
-            max_iter=5000,
-            seed=BASE_SEED
+        env_map=env_generator_cluster(
+            map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
+            num_clusters=20,             # 建议 10~15 之间，保证有足够空间
+            chain_length_range=(1, 4),   # 每个簇的圆柱体数量
+            r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
+            r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
+            r_risk_range=(10, 20),       # 风险半径偏移量
+            zmax_range=(240, 240),
+            min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
+            seed=BASE_SEED,
         )
+        # env_map = env_generator(
+        #     rho=random.uniform(0.4, 0.5),   # 数据更丰富不容易出现过拟合
+        #     map_dim=(1500, 1500, 240),
+        #     r_crash_range=(30, 50),
+        #     r_risk_range=(3, 7),
+        #     zmax_range=(30, 240),
+        #     max_iter=5000,
+        #     seed=BASE_SEED
+        # )
         obstacle_list = env_map["obstacles"]
         print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。开始执行 RRT* 与质量筛选...")
 
@@ -2482,15 +2754,15 @@ if __name__ == '__main__':
             file_name = f"map{map_id}_task{saved_tasks}.npz"
             full_save_path = os.path.join(SAVE_DIR, file_name)
             
-            save_sample7(
+            save_sample3(
                 env_map,
                 file_path=full_save_path, 
                 best_path=path,
                 waypoints=straight_waypoints,
                 N_attempts=4096,
                 alpha=0.3,
-                sigma1=0.2,
-                sigma2=0.15,
+                sigma1=0.3,
+                sigma2=0.225,
                 eps=1e-8,
                 visualize=True if saved_tasks < 0 else False  # 仅可视化前10个高质量任务
             )

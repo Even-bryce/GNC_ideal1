@@ -19,13 +19,13 @@ SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\checkpoints"
 
 # 2. 真实的训练数据路径
 # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
-DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data16"
+DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data63"
 # DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
 
 START_EPOCH = 1  # 如果从头训练填 1；如果调参直接从第 41 轮开始，填 41
 PRETRAINED_CKPT = r"C:\Users\Administrator\Desktop\experiments\checkpoints\ckpt_epoch_40.pth" # 填入你第40轮保存的权重路径
 
-TRAIN_STAGE = "B"  # 可选: "A" (训练管道) 或 "B" (训练航路点)
+TRAIN_STAGE = "A"  # 可选: "A" (训练管道) 或 "B" (训练航路点)
 MODEL_A_CKPT = r"C:\Users\Administrator\Desktop\experiments\checkpoints\Stage_A\best_model.pth" # 阶段 B 需要用到 A 的权重
 
 GAMMA = 2
@@ -95,6 +95,7 @@ def train_one_epoch_A(model, loader, criterion, optimizer, device, epoch_idx):
             points = points.permute(0, 2, 1) 
         
         xyz = points[:, :3, :].permute(0, 2, 1).contiguous()
+        points_input = points[:, :5, :]
 
 
         optimizer.zero_grad()
@@ -102,7 +103,7 @@ def train_one_epoch_A(model, loader, criterion, optimizer, device, epoch_idx):
         # ==========================================
         # 💡 修改点 2：把 mask 传给模型和 Loss
         # ==========================================
-        output = model(points[:, :6, :], mask=mask) 
+        output = model(points_input, mask=mask) 
         logits = output[0] if isinstance(output, (tuple, list)) else output
 
         loss, metrics = criterion(logits, targets, points, mask=mask)
@@ -496,9 +497,10 @@ def validate_A(model, loader, criterion, device):
                 points = points.permute(0, 2, 1)
                 
             xyz = points[:, :3, :].permute(0, 2, 1).contiguous()
+            points_input = points[:, :5, :]
 
             # 💡 2. 传入 mask 给模型
-            output = model(points[:, :6, :], mask=mask)
+            output = model(points_input, mask=mask)
             logits = output[0] if isinstance(output, (tuple, list)) else output
 
             # 💡 3. 传入 mask 给 criterion，并接收 metrics 进行统计
@@ -935,7 +937,7 @@ def main():
         print("🚀 启动阶段一：训练管道探路模型 (Model A)")
         print("="*50)
         
-        model_A = get_model(num_classes=1, input_dim=6, dropout_p=0.0).to(device)
+        model_A = get_model(num_classes=1, input_dim=5, dropout_p=0.0).to(device)
         
         # ... (这里保留你原本的 Model A 预训练加载逻辑和 loss 配置) ...
         criterion = get_loss(
@@ -1061,17 +1063,17 @@ def main():
         # val_loader_B = build_dataloader(offline_val_files, batch_size=32, shuffle=False)
         # print(f"[*] ♻️ DataLoader 重构完毕，新的训练集样本数: {len(offline_train_files)}")
 
-        all_files_B = glob.glob(os.path.join(r"C:\Users\Administrator\Desktop\experiments\train_data16\enriched_all_stage_B", "*.npz"))
+        all_files_B = glob.glob(os.path.join(r"C:\Users\Administrator\Desktop\experiments\train_data16\enriched_all_stage_B_Augmented", "*.npz"))
         train_files_B = all_files_B[:int(len(all_files_B)*0.8)]
         val_files_B = all_files_B[int(len(all_files_B)*0.8):]
-        train_loader_B = build_dataloader(train_files_B, batch_size=32, shuffle=True)
-        val_loader_B = build_dataloader(val_files_B, batch_size=32, shuffle=False)
+        train_loader_B = build_dataloader(train_files_B, batch_size=128, shuffle=True)
+        val_loader_B = build_dataloader(val_files_B, batch_size=128, shuffle=False)
         # =========================================================
 
         # 💡 2. 实例化 Model B (核心：输入维度 + 1，因为拼接了 P_tube)
         # 注意：这里你可以把 dropout 调高一点，防止在小规模正样本上过拟合
         # 测试发现share_planes比较大时效果更好，stride保证最终下采样层的点数在32-128区间，nsample貌似没有什么影响
-        model_B = get_model(num_classes=1, input_dim=7, dropout_p=0.1, blocks=[1,2,2], stride=[1,2,2], nsample=[8,8,8], share_planes=16).to(device)
+        model_B = get_model(num_classes=1, input_dim=7, dropout_p=0.2, blocks=[1,2,2], stride=[1,2,2], nsample=[8,8,8], share_planes=16).to(device)
         print(f"[*] 🚀 Model B 已初始化，输入特征维度已自动扩展至: {real_input_dim + 1}")
 
         # 💡 3. Model B 专属的 loss

@@ -306,6 +306,7 @@ def evaluate_A(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02
             mask = mask.to(device) # 💡 将 mask 放入 GPU
             
             points_trans = points.permute(0, 2, 1).contiguous() 
+            # points_trans = points_trans[:, :6, :]
 
             # 💡 修改 2：把 mask 传给模型
             output = model(points_trans, mask=mask)
@@ -828,7 +829,7 @@ def evaluate_B(model_B_path, model_A_path, data_dir, map_dim, cluster_eps=0.02, 
 if __name__ == "__main__":
     
     # DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data9"
-    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data15"
+    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
     # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
     # CKPT_PATH = r"C:\Users\Administrator\Desktop\experiments\checkpoints\best_model.pth"
     A_CKPT_PATH = r"c:\Users\Administrator\Desktop\experiments\checkpoints\Stage_A\best_model.pth"
@@ -846,20 +847,20 @@ if __name__ == "__main__":
     CLUSTER_EPS = 0.15 
     PEAK_RADIUS = 0.15 
 
-    # evaluate_A(
-    #     model_path=A_CKPT_PATH, 
-    #     data_dir=DATA_DIR, 
-    #     map_dim=MAP_DIM,
-    #     cluster_eps=CLUSTER_EPS,
-    #     peak_radius=PEAK_RADIUS
-    # )
-
-    evaluate_B(
-        model_B_path=B_CKPT_PATH,
-        model_A_path=A_CKPT_PATH,
+    evaluate_A(
+        model_path=A_CKPT_PATH, 
         data_dir=DATA_DIR, 
         map_dim=MAP_DIM,
         cluster_eps=CLUSTER_EPS,
-        peak_radius=PEAK_RADIUS,
-        tube_thresh=0.4
+        peak_radius=PEAK_RADIUS
     )
+
+    # evaluate_B(
+    #     model_B_path=B_CKPT_PATH,
+    #     model_A_path=A_CKPT_PATH,
+    #     data_dir=DATA_DIR, 
+    #     map_dim=MAP_DIM,
+    #     cluster_eps=CLUSTER_EPS,
+    #     peak_radius=PEAK_RADIUS,
+    #     tube_thresh=0.4
+    # )

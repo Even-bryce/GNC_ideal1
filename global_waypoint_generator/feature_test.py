@@ -12,18 +12,18 @@ from tqdm import tqdm
 def visualize_feature_distributions(npz_file_path, save_dir='./output_plots'):
     print(f"正在加载数据: {npz_file_path}")
     data = np.load(npz_file_path)
-    points = data['points']  # shape: [N, 9]
+    points = data['points'][:,:9]  # shape: [N, 9]
     labels = data['labels']  # shape: [N, 2]
 
-    feature_names = ['f_start', 'f_goal', 'd_obs_norm', 'nx', 'ny']
+    feature_names = ['f_start', 'f_goal', 'd_obs_norm', 'r', 'x','y']
     
     # 1. 提取有效数据
-    features = points[2:, 3:8]
+    features = points[2:, 3:9]
     point_scores = labels[2:, 0] 
 
     # 2. 划分正负样本
     wp_mask = point_scores > 0.8
-    bg_mask = point_scores < 0.4
+    bg_mask = point_scores < 0.5
 
     wp_features = features[wp_mask]
     bg_features = features[bg_mask]
@@ -40,7 +40,7 @@ def visualize_feature_distributions(npz_file_path, save_dir='./output_plots'):
     df_wp['Class'] = 'Waypoint (Score > 0.8)'
 
     df_bg = pd.DataFrame(bg_features, columns=feature_names)
-    df_bg['Class'] = 'Background (Score < 0.4)'
+    df_bg['Class'] = 'Background (Score < 0.5)'
 
     df_all = pd.concat([df_wp, df_bg], ignore_index=True)
 
@@ -83,22 +83,22 @@ def visualize_feature_distributions(npz_file_path, save_dir='./output_plots'):
     print(f"✅ 图片已成功保存至: {save_path}")
 
     # 如果你在服务器上跑，不需要弹窗，可以直接把下面这行注释掉
-    plt.show()
+    # plt.show()
 
     
 
-    # 5. [进阶] 绘制联合分布图 (Pairplot)
-    # 观察特征组合起来是否能更好地区分
-    print("正在绘制特征散点相关性矩阵...")
-    sns.pairplot(
-        df_all, 
-        vars=['f_start', 'f_goal', 'd_obs_norm'], # 选几个主要标量特征
-        hue='Class', 
-        plot_kws={'alpha': 0.6, 's': 15},
-        palette=['#FF5722', '#03A9F4']
-    )
-    plt.suptitle("Feature Pairplot (Joint Distributions)", y=1.02)
-    plt.show()
+    # # 5. [进阶] 绘制联合分布图 (Pairplot)
+    # # 观察特征组合起来是否能更好地区分
+    # print("正在绘制特征散点相关性矩阵...")
+    # sns.pairplot(
+    #     df_all, 
+    #     vars=['f_start', 'f_goal', 'd_obs_norm'], # 选几个主要标量特征
+    #     hue='Class', 
+    #     plot_kws={'alpha': 0.6, 's': 15},
+    #     palette=['#FF5722', '#03A9F4']
+    # )
+    # plt.suptitle("Feature Pairplot (Joint Distributions)", y=1.02)
+    # plt.show()
 
 
 def visualize_feature_distributions_B(npz_file_path, save_dir='./output_plots'):
@@ -216,7 +216,7 @@ def compute_asymmetry_and_visualize(npz_file_path, R=3.0, save_dir='./output_plo
     xyz = points[:, 0:3]          # 三维坐标
     f_start = points[:, 3]        # 起点特征
     f_goal = points[:, 4]         # 终点特征
-    point_scores = labels[:, 1]   # 航路点真值 (通道 2)
+    point_scores = labels[:, 0]   # 航路点真值 (通道 2)
 
     # 2. 💡 巧妙获取起终点坐标 (寻找 f_start 和 f_goal 的最大值位置)
     start_pos = xyz[np.argmax(f_start)]
@@ -327,7 +327,7 @@ def compute_orthogonal_tension_and_visualize(npz_file_path, R=3.0, save_dir='./o
     xyz = points[:, 0:3]          # 三维坐标
     f_start = points[:, 3]        # 起点特征
     f_goal = points[:, 4]         # 终点特征
-    point_scores = labels[:, 1]   # 航路点真值 (通道 2)
+    point_scores = labels[:, 0]   # 航路点真值 (通道 2)
 
     # 2. 巧妙获取终点坐标 (寻找 f_goal 的最大值位置)
     goal_pos = xyz[np.argmax(f_goal)]
@@ -441,7 +441,7 @@ def compute_flow_density_and_visualize(npz_file_path, R=3.0, save_dir='./output_
     xyz = points[:, 0:3]          # 三维坐标
     f_start = points[:, 3]        # 起点特征
     f_goal = points[:, 4]         # 终点特征
-    point_scores = labels[:, 1]   # 航路点真值 (通道 2)
+    point_scores = labels[:, 0]   # 航路点真值 (通道 2)
 
     # 2. 利用 KDTree 进行高效的半径邻域搜索
     print(f"构建 KDTree 并搜索半径 R={R} 内的局部点云...")
@@ -526,7 +526,7 @@ def compute_pca_anisotropy_and_visualize(npz_file_path, R=3.0, save_dir='./outpu
     xyz = points[:, 0:3]          # 三维坐标
     f_start = points[:, 3]        # 起点特征
     f_goal = points[:, 4]         # 终点特征
-    point_scores = labels[:, 1]   # 航路点真值 (通道 2)
+    point_scores = labels[:, 0]   # 航路点真值 (通道 2)
 
     # 2. KDTree 邻域搜索
     print(f"构建 KDTree 并搜索半径 R={R} 内的局部点云...")
@@ -937,39 +937,124 @@ def analyze_single_label_distribution(npz_file_path, target_channel=2, save_dir=
     print(f"\n✅ 标签分布直方图已保存至: {save_path}")
     print("="*50)
 
+def augment_point_cloud_data(data_dir, save_dir, feature_key='features', num_augs=5):
+    """
+    对指定文件夹下的 npz 文件进行三维坐标系随机旋转增强。
+    
+    参数:
+    - data_dir: 原始数据文件夹路径
+    - save_dir: 增强后数据的保存路径
+    - feature_key: npz 文件中存储特征的键名 (例如 'features', 'points', 'data')
+    - num_augs: 每个原始样本生成多少个增强样本 (默认 5 个)
+    """
+    print(f"\n" + "="*60)
+    print(f"🚀 开始执行数据增强 (随机旋转 Z 轴)")
+    print(f"📂 源目录: {data_dir}")
+    print(f"📁 目标目录: {save_dir}")
+    print(f"🔄 增强倍数: 1 变 {num_augs}")
+    print("="*60)
+
+    # 1. 创建目标文件夹
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # 2. 获取所有 npz 文件
+    npz_files = glob.glob(os.path.join(data_dir, "*.npz"))
+    if not npz_files:
+        print("❌ 未在指定目录下找到任何 .npz 文件！")
+        return
+
+    # 3. 遍历处理每个文件
+    for idx, file_path in enumerate(npz_files):
+        base_name = os.path.basename(file_path).replace('.npz', '')
+        
+        # 加载数据并将 npz 转换为普通字典，方便修改
+        data = np.load(file_path)
+        data_dict = {key: data[key] for key in data.files}
+        
+        # 检查特征键名是否存在
+        if feature_key not in data_dict:
+            print(f"❌ 警告: 文件 {base_name}.npz 中未找到键 '{feature_key}'，已跳过。")
+            continue
+            
+        original_features = data_dict[feature_key]
+        
+        # 确保数据维度至少包含 (x, y, z)
+        if original_features.shape[-1] < 3:
+            print(f"❌ 警告: {base_name}.npz 的特征维度小于 3，无法进行 3D 旋转，已跳过。")
+            continue
+
+        print(f"[{idx+1}/{len(npz_files)}] 正在处理: {base_name} (特征维度: {original_features.shape})")
+
+        # 4. 生成 5 个增强版本
+        for i in range(num_augs):
+            # 浅拷贝字典结构，但为特征矩阵创建深度拷贝
+            aug_dict = data_dict.copy()
+            aug_features = original_features.copy()
+
+            # --- 💡 生成随机旋转矩阵 (绕 Z 轴) ---
+            # theta 范围在 0 到 2π 之间
+            theta = np.random.uniform(0, 2 * np.pi)
+            
+            rot_z = np.array([
+                [np.cos(theta), -np.sin(theta), 0],
+                [np.sin(theta),  np.cos(theta), 0],
+                [0,             0,              1]
+            ])
+            
+            # --- 💡 应用旋转 (只作用于前三个维度 x, y, z) ---
+            # 坐标形状为 [N, 3]，矩阵乘法: (N, 3) @ (3, 3) -> (N, 3)
+            # 注意 np.dot 默认需要转置右侧矩阵，或者直接用 @
+            aug_features[:, :3] = aug_features[:, :3] @ rot_z.T
+            
+            # 将增强后的特征塞回字典
+            aug_dict[feature_key] = aug_features
+            
+            # 5. 保存增强后的文件
+            # 命名规则: 原文件名_aug1.npz
+            out_name = f"{base_name}_aug{i+1}.npz"
+            out_path = os.path.join(save_dir, out_name)
+            
+            # 使用 savez_compressed 进行压缩存储，节省硬盘空间
+            np.savez_compressed(out_path, **aug_dict)
+
+    print(f"\n✅ 数据增强全部完成！共生成了 {len(npz_files) * num_augs} 个增强文件。")
+    print(f"✅ 文件已保存至: {save_dir}")
+    print("="*60)
+
 # 调用测试
 if __name__ == "__main__":
-    # # 基础路径配置
-    # base_dir = r"C:\Users\Administrator\Desktop\experiments\train_data16"
-    # save_directory = os.path.join(base_dir, "plots")  # 保存图片的文件夹路径
+    # 基础路径配置
+    base_dir = r"C:\Users\Administrator\Desktop\experiments\train_data18"
+    save_directory = os.path.join(base_dir, "plots")  # 保存图片的文件夹路径
     
-    # # 你想随机抽取测试的文件数量
-    # num_test_samples = 5 
+    # 你想随机抽取测试的文件数量
+    num_test_samples = 5 
     
-    # print(f"🚀 开始批量随机测试，计划抽取 {num_test_samples} 个文件...")
+    print(f"🚀 开始批量随机测试，计划抽取 {num_test_samples} 个文件...")
     
-    # for i in range(num_test_samples):
-    #     # 💡 随机生成 map 和 task 的数字
-    #     map_id = random.randint(0, 0)     # 生成 0 到 49 之间的随机整数
-    #     task_id = random.randint(0, 9)   # 生成 0 到 19 之间的随机整数
+    for i in range(num_test_samples):
+        # 💡 随机生成 map 和 task 的数字
+        map_id = random.randint(0, 0)     # 生成 0 到 49 之间的随机整数
+        task_id = random.randint(0, 9)   # 生成 0 到 19 之间的随机整数
         
-    #     # 拼接出完整的文件名和路径
-    #     file_name = f"map{map_id}_task{task_id}.npz"
-    #     sample_file = os.path.join(base_dir, file_name)
+        # 拼接出完整的文件名和路径
+        file_name = f"map{map_id}_task{task_id}.npz"
+        sample_file = os.path.join(base_dir, file_name)
         
-    #     print("-" * 40)
-    #     print(f"[{i+1}/{num_test_samples}] 尝试处理: {file_name}")
+        print("-" * 40)
+        print(f"[{i+1}/{num_test_samples}] 尝试处理: {file_name}")
         
-    #     if os.path.exists(sample_file):
-    #         visualize_feature_distributions(sample_file, save_directory)
-    #     else:
-    #         print(f"❌ 未找到文件: {sample_file}，已跳过。")
+        if os.path.exists(sample_file):
+            visualize_feature_distributions(sample_file, save_directory)
+        else:
+            print(f"❌ 未找到文件: {sample_file}，已跳过。")
             
-    # print("-" * 40)
-    # print("✅ 批量测试结束！请前往 plots 文件夹查看生成的图片。")
-    # 💡 指向新的验证集目录
-    # 指向新的验证集目录
-    # val_dir = r"C:\Users\Administrator\Desktop\experiments\train_data16\val"
+    print("-" * 40)
+    print("✅ 批量测试结束！请前往 plots 文件夹查看生成的图片。")
+    # -------------------------------批量测试数据的新特征分布--------------------------------
+    # # 💡 指向新的验证集目录
+    # # 指向新的验证集目录
+    # val_dir = r"C:\Users\Administrator\Desktop\experiments\train_data6"
     # save_directory = os.path.join(val_dir, "plots")  # 保存图片的文件夹路径
     
     # # 获取所有的 .npz 文件
@@ -995,19 +1080,19 @@ if __name__ == "__main__":
     # print("-" * 50)
     # print(f"✅ 批量测试结束！请前往 {save_directory} 查看生成的图片。")
 
-    # SEARCH_RADIUS = 0.1
+    SEARCH_RADIUS = 0.1
     
-    # # 随机抽样测试
-    # test_files = random.sample(all_val_files, min(20, len(all_val_files)))
+    # 随机抽样测试
+    test_files = random.sample(all_val_files, min(20, len(all_val_files)))
     
-    # # for file in test_files:
-    #     # compute_asymmetry_and_visualize(file, R=SEARCH_RADIUS, save_dir=save_directory)
-    #     # compute_orthogonal_tension_and_visualize(file, R=SEARCH_RADIUS, save_dir=save_directory)
-    #     # compute_flow_density_and_visualize(file, R=SEARCH_RADIUS, save_dir=save_directory)
-    #     # compute_pca_anisotropy_and_visualize(file, R=SEARCH_RADIUS, save_dir=save_directory)
+    # for file in test_files:
+        # compute_asymmetry_and_visualize(file, R=SEARCH_RADIUS, save_dir=save_directory)
+        # compute_orthogonal_tension_and_visualize(file, R=SEARCH_RADIUS, save_dir=save_directory)
+        # compute_flow_density_and_visualize(file, R=SEARCH_RADIUS, save_dir=save_directory)
+        # compute_pca_anisotropy_and_visualize(file, R=SEARCH_RADIUS, save_dir=save_directory)
         
-    # print("-" * 50)
-    # print(f"✅ 特征检验完成！请前往 {save_directory} 查看。")
+    print("-" * 50)
+    print(f"✅ 特征检验完成！请前往 {save_directory} 查看。")
 
 
     # # ------------------------------生成新数据--------------------------------
@@ -1084,21 +1169,33 @@ if __name__ == "__main__":
     # print("-" * 50)
     # print(f"✅ 增强特征检验完成！请前往 {save_directory} 查看合并后的特征大图。")
 
-    # -------------------------------单通道标签分布分析--------------------------------
-    data_dir = r"C:\Users\Administrator\Desktop\experiments\train_data16\enriched_all_stage_B"
-    save_directory = os.path.join(data_dir, "plots_labels") 
+    # # -------------------------------单通道标签分布分析--------------------------------
+    # data_dir = r"C:\Users\Administrator\Desktop\experiments\train_data6"
+    # save_directory = os.path.join(data_dir, "plots_labels") 
     
-    # 💡 核心参数：你想看第几个通道？
-    # Model A 数据通常看 1，Model B 数据通常看 2
-    TARGET_CH = 2 
+    # # 💡 核心参数：你想看第几个通道？
+    # # Model A 数据通常看 1，Model B 数据通常看 2
+    # TARGET_CH = 1 
     
-    all_files = glob.glob(os.path.join(data_dir, "*.npz"))
+    # all_files = glob.glob(os.path.join(data_dir, "*.npz"))
     
-    if len(all_files) == 0:
-        print(f"❌ 错误: 未在 {data_dir} 找到 npz 文件！")
-    else:
-        # 随机抽取 1 个文件查看
-        sample_file = all_files[0] 
-        analyze_single_label_distribution(sample_file, target_channel=TARGET_CH, save_dir=save_directory)
+    # if len(all_files) == 0:
+    #     print(f"❌ 错误: 未在 {data_dir} 找到 npz 文件！")
+    # else:
+    #     # 随机抽取 1 个文件查看
+    #     sample_file = all_files[0] 
+    #     analyze_single_label_distribution(sample_file, target_channel=TARGET_CH, save_dir=save_directory)
 
+    # # -------------------------------数据增强测试--------------------------------
+    # SOURCE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data16\enriched_all_stage_B"
+    # # 建议将增强数据存入同级的新文件夹中，防止覆盖原始数据
+    # TARGET_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data16\enriched_all_stage_B_Augmented"
+    
+    # # ⚠️ 请根据你 npz 内部真实的键名修改 'features' (例如改为 'points', 'x' 等)
+    # augment_point_cloud_data(
+    #     data_dir=SOURCE_DIR, 
+    #     save_dir=TARGET_DIR, 
+    #     feature_key='points',  
+    #     num_augs=5
+    # )
     

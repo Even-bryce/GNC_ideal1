@@ -421,9 +421,6 @@ class PointTransformerSeg(nn.Module):
         super().__init__()
         self.c = c
         self.num_stages = len(blocks)
-
-
-        self.extra_dim = self.c - 3 if self.c > 3 else 0
         
         # 💡 1. 动态生成每层的特征维度、步长和采样点数
         # 维度以 32 起步，每次翻倍: [32, 64, 128, 256, 512, ...]
@@ -462,7 +459,7 @@ class PointTransformerSeg(nn.Module):
 
         # 最终的分类/回归头
         self.cls = nn.Sequential(
-            nn.Linear(planes[0] + self.extra_dim, planes[0]), 
+            nn.Linear(planes[0], planes[0]), 
             nn.BatchNorm1d(planes[0]), 
             nn.ReLU(inplace=True), 
             nn.Dropout(p=dropout_p), 
@@ -488,9 +485,6 @@ class PointTransformerSeg(nn.Module):
     def forward(self, pxo):
         p0, x0, o0 = pxo  # (n, 3), (n, c), (b)
         x0 = p0 if self.c == 3 else torch.cat((p0, x0), 1)
-        # x0 = p0 if self.c == 3 else torch.cat((torch.zeros_like(p0), x0), 1)
-
-        raw_extra_features = x0[:, -self.extra_dim:]
         
         curr_pxo = [p0, x0, o0]
         enc_outputs = []
@@ -519,12 +513,6 @@ class PointTransformerSeg(nn.Module):
                 p_skip, x_skip, o_skip = enc_outputs[stage_idx]
                 x_curr = dec_layer[1:]([p_skip, dec_layer[0]([p_skip, x_skip, o_skip], [p_curr, x_curr, o_curr]), o_skip])[1]
                 p_curr, o_curr = p_skip, o_skip
-
-        if self.extra_dim > 0:
-            # x_curr 维度: (n, planes[0])
-            # raw_extra_features 维度: (n, c-3)
-            # 拼接后维度: (n, planes[0] + c - 3)
-            x_curr = torch.cat((x_curr, raw_extra_features), dim=1)
                 
         # 分类头
         x = self.cls(x_curr)

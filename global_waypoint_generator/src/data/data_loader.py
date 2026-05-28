@@ -38,7 +38,7 @@ def collate_fn(batch):
     # points_batch 初始化为 0
     points_batch = torch.zeros(B, N_max, D)
     # targets_batch 初始化为 0 或 -1 (取决于你的 Loss 处理)
-    targets_batch = torch.zeros(B, N_max, 2)
+    targets_batch = torch.zeros(B, N_max, 1)
     # targets_batch = torch.zeros(B, N_max, 2)
     # mask_batch 初始化为 False (或 0)
     mask_batch = torch.zeros(B, N_max, dtype=torch.bool)
