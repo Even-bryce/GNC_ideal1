@@ -5,7 +5,9 @@ from mpl_toolkits.mplot3d import Axes3D
 import os
 import glob
 from scipy.spatial import KDTree
+from scipy.spatial.distance import cdist
 from sklearn.cluster import DBSCAN
+import networkx as nx
 
 # 导入你的模块
 from src.data.data_loader import PathPointDataset, collate_fn
@@ -72,6 +74,161 @@ def extract_waypoints(points_norm, scores, map_dim, eps=0.02, peak_radius=0.02):
         waypoints_norm.append(cluster_norm[best_idx])
 
     return np.array(waypoints_norm)
+
+
+
+def extract_waypoints_knn_astar(points_norm, scores, start_pt, goal_pt, k_neighbors=10, epsilon=0.05, visualize=True):
+    """
+    策略一：KNN建图 + 连通分量桥接 + A*搜索 + RDP抽稀
+    """
+    def rdp(points, epsilon):
+        """
+        道格拉斯-普克 (RDP) 算法：用于抽稀密集的路径点，提取真正的折线航路点（拐点）
+        """
+        if len(points) <= 2:
+            return points
+
+        dmax = 0.0
+        index = 0
+        end = len(points) - 1
+        
+        line_vec = points[end] - points[0]
+        line_len = np.linalg.norm(line_vec)
+        
+        if line_len == 0:
+            return np.array([points[0], points[end]])
+
+        line_unitvec = line_vec / line_len
+
+        for i in range(1, end):
+            vec_to_pt = points[i] - points[0]
+            proj_len = np.dot(vec_to_pt, line_unitvec)
+            closest_point = points[0] + proj_len * line_unitvec
+            d = np.linalg.norm(points[i] - closest_point)
+            
+            if d > dmax:
+                index = i
+                dmax = d
+
+        if dmax > epsilon:
+            left_results = rdp(points[:index+1], epsilon)
+            right_results = rdp(points[index:], epsilon)
+            # 拼接时去掉重复的中间断点
+            return np.vstack((left_results[:-1], right_results))
+        else:
+            return np.array([points[0], points[end]])
+        
+    if len(points_norm) == 0:
+        return np.array([start_pt, goal_pt])
+
+    max_score_val = np.max(scores) if len(scores) > 0 else 1.0
+    all_points = np.vstack([start_pt, points_norm, goal_pt])
+    all_scores = np.concatenate([[max_score_val * 1.5], scores, [max_score_val * 1.5]]) 
+    
+    N = len(all_points)
+    start_idx = 0
+    goal_idx = N - 1
+    actual_k = min(k_neighbors + 1, N) 
+
+    # 1. KNN 建图
+    tree = KDTree(all_points)
+    G = nx.Graph()
+    distances, indices = tree.query(all_points, k=actual_k)
+    for i in range(N):
+        for d, j in zip(distances[i][1:], indices[i][1:]): 
+            if not G.has_edge(i, j):
+                avg_score = (all_scores[i] + all_scores[j]) / 2.0
+                cost = d / (avg_score + 1e-5) 
+                G.add_edge(i, j, weight=cost)
+
+    # 2. 连通分量桥接
+    components = list(nx.connected_components(G))
+    while len(components) > 1:
+        comp_a = list(components[0])
+        rest = [node for comp in components[1:] for node in comp]
+        pts_a = all_points[comp_a]
+        pts_rest = all_points[rest]
+        
+        dist_matrix = cdist(pts_a, pts_rest)
+        min_idx_flat = np.argmin(dist_matrix)
+        idx_a, idx_rest = np.unravel_index(min_idx_flat, dist_matrix.shape)
+        
+        node_a = comp_a[idx_a]
+        node_rest = rest[idx_rest]
+        
+        bridge_dist = dist_matrix[idx_a, idx_rest]
+        bridge_score = (all_scores[node_a] + all_scores[node_rest]) / 2.0
+        bridge_cost = bridge_dist / (bridge_score + 1e-5)
+        
+        G.add_edge(node_a, node_rest, weight=bridge_cost)
+        components = list(nx.connected_components(G))
+
+    # 3. A* 搜索得到密集路径 (dense_path)
+    def astar_heuristic(node, target):
+        dist_to_goal = np.linalg.norm(all_points[node] - all_points[target])
+        return dist_to_goal / (max_score_val * 1.5 + 1e-5)
+
+    try:
+        path_indices = nx.astar_path(
+            G, source=start_idx, target=goal_idx, 
+            heuristic=astar_heuristic, weight='weight'
+        )
+    except nx.NetworkXNoPath:
+        return np.array([start_pt, goal_pt])
+    
+    dense_path = all_points[path_indices]
+
+    # 4. RDP 抽稀提取真正的航路点
+    waypoints_seq = rdp(dense_path, epsilon=epsilon)
+
+    # ==========================================
+    # 5. 内置可视化模块 (针对 Debug)
+    # ==========================================
+    if visualize:
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d import Axes3D
+        
+        fig = plt.figure(figsize=(10, 8))
+        ax = fig.add_subplot(111, projection='3d')
+
+        # [图层 1] 模型预测点云 (浅灰色)
+        ax.scatter(points_norm[:, 0], points_norm[:, 1], points_norm[:, 2], 
+                   c='gray', marker='.', alpha=0.3, label='Predicted Points')
+
+        # [图层 2] A* 密集路径 dense_path (青色虚线)
+        if len(dense_path) > 1:
+            ax.plot(dense_path[:, 0], dense_path[:, 1], dense_path[:, 2], 
+                    c='cyan', linestyle='--', linewidth=1.5, alpha=0.8, label='A* Dense Path')
+
+        # [图层 3] 最终航路点 waypoints_seq (深蓝色粗实线 + 橙色拐点)
+        if len(waypoints_seq) > 1:
+            ax.plot(waypoints_seq[:, 0], waypoints_seq[:, 1], waypoints_seq[:, 2], 
+                    c='blue', linewidth=2.5, label='RDP Final Waypoints')
+            if len(waypoints_seq) > 2:
+                ax.scatter(waypoints_seq[1:-1, 0], waypoints_seq[1:-1, 1], waypoints_seq[1:-1, 2], 
+                           c='orange', s=60, marker='^', zorder=5, label='Turning Nodes')
+
+        # [图层 4] 起点与终点
+        ax.scatter(*start_pt, c='green', s=100, marker='o', zorder=10, label='Start')
+        ax.scatter(*goal_pt, c='red', s=100, marker='*', zorder=10, label='Goal')
+
+        ax.set_title(f'A* Path vs RDP Waypoints (epsilon={epsilon})')
+        ax.legend(loc='best')
+        
+        # 限制坐标轴比例防畸变
+        max_range = np.array([all_points[:,0].max()-all_points[:,0].min(), 
+                              all_points[:,1].max()-all_points[:,1].min(), 
+                              all_points[:,2].max()-all_points[:,2].min()]).max() / 2.0
+        mid_x = (all_points[:,0].max()+all_points[:,0].min()) * 0.5
+        mid_y = (all_points[:,1].max()+all_points[:,1].min()) * 0.5
+        mid_z = (all_points[:,2].max()+all_points[:,2].min()) * 0.5
+        ax.set_xlim(mid_x - max_range, mid_x + max_range)
+        ax.set_ylim(mid_y - max_range, mid_y + max_range)
+        ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+        plt.show()
+
+    return waypoints_seq
 
 
 # 💡 增加了一个 true_mid_wps 参数接收真实航路点
@@ -306,7 +463,7 @@ def evaluate_A(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02
             mask = mask.to(device) # 💡 将 mask 放入 GPU
             
             points_trans = points.permute(0, 2, 1).contiguous() 
-            # points_trans = points_trans[:, :6, :]
+            # points_trans = points_trans[:, :4, :]
 
             # 💡 修改 2：把 mask 传给模型
             output = model(points_trans, mask=mask)
@@ -392,17 +549,45 @@ def evaluate_A(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02
             pred_xyz_filtered = mid_xyz[pred_mask_vis].cpu().numpy()
             pred_scores_filtered = mid_prob[pred_mask_vis].cpu().numpy()
             
-            raw_pred_mid_waypoints = extract_waypoints(
-                pred_xyz_filtered, pred_scores_filtered, 
-                map_dim=map_dim, eps=cluster_eps, peak_radius=peak_radius
+            # raw_pred_mid_waypoints = extract_waypoints(
+            #     pred_xyz_filtered, pred_scores_filtered, 
+            #     map_dim=map_dim, eps=cluster_eps, peak_radius=peak_radius
+            # )
+
+            # pred_mid_waypoints = filter_zigzag_waypoints(
+            #     start_pt, goal_pt, raw_pred_mid_waypoints, 
+            #     min_dist=0.05,       
+            #     local_thresh=0.2,    
+            #     max_turn_angle=60.0  
+            # )
+
+            # ==========================================
+            # 新方案：KNN建图 + 断层桥接 + A*搜索 + RDP抽稀
+            # ==========================================
+            # 安全检查：确保 start_pt 和 goal_pt 是 numpy 格式（如果之前是 Tensor 的话）
+            if hasattr(start_pt, 'cpu'): start_pt = start_pt.cpu().numpy()
+            if hasattr(goal_pt, 'cpu'): goal_pt = goal_pt.cpu().numpy()
+
+            # 这里的 epsilon 扮演了原来 filter_zigzag_waypoints 中的角色
+            # 它决定了航路点的“精简程度”。0.05 代表偏离直线 0.05 距离内的波动都会被拉直。
+            waypoints_seq = extract_waypoints_knn_astar(
+                points_norm=pred_xyz_filtered, 
+                scores=pred_scores_filtered, 
+                start_pt=start_pt, 
+                goal_pt=goal_pt, 
+                k_neighbors=5,  # 只要 <=50 点，底层逻辑都能极速 hold 住；10 是一个很好的稀疏图起点
+                epsilon=0.08     # 可以根据你空间的实际比例微调这个抽稀阈值
             )
 
-            pred_mid_waypoints = filter_zigzag_waypoints(
-                start_pt, goal_pt, raw_pred_mid_waypoints, 
-                min_dist=0.05,       
-                local_thresh=0.2,    
-                max_turn_angle=60.0  
-            )
+            # 【关键注意】：
+            # 新的 extract_waypoints_knn_astar 必定会返回包含 [起点, ..., 终点] 的完整序列。
+            # 如果你的下游代码（比如后续的样条插值或轨迹求导）只需要“纯中间航路点”，
+            # 请在这里掐头去尾，去掉第一个(起点)和最后一个(终点)元素：
+            if len(waypoints_seq) > 2:
+                pred_mid_waypoints = waypoints_seq[1:-1]
+            else:
+                # 如果没找到中间点，或者被抽稀到只剩一条直线，返回空数组
+                pred_mid_waypoints = np.empty((0, 3))
             
             gt_mask_vis = mid_target > 0.8
             gt_xyz_filtered = mid_xyz[gt_mask_vis].cpu().numpy()
@@ -417,7 +602,7 @@ def evaluate_A(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02
                 visualize_result(
                     xyz_vis, target_vis, prob_vis, 
                     start_pt, goal_pt, gt_mid_waypoints, pred_mid_waypoints, true_mid_wps,
-                    threshold=0.5
+                    threshold=0.8
                 )
 
                 cmd = input("Press Enter for next sample, or 'n' to stop: ")
@@ -829,7 +1014,7 @@ def evaluate_B(model_B_path, model_A_path, data_dir, map_dim, cluster_eps=0.02, 
 if __name__ == "__main__":
     
     # DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data9"
-    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data6"
+    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data65"
     # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
     # CKPT_PATH = r"C:\Users\Administrator\Desktop\experiments\checkpoints\best_model.pth"
     A_CKPT_PATH = r"c:\Users\Administrator\Desktop\experiments\checkpoints\Stage_A\best_model.pth"
