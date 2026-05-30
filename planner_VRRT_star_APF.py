@@ -69,8 +69,10 @@ class VRRT_star_APF:
         time_first_list = [None] * num_trees
         path_length_list = [None] * num_trees
         
-        start_time = time.time()
+        best_paths = np.full(num_trees, None, dtype=object)
+        best_costs = [np.inf] * num_trees
         
+        start_time = time.time()
         for i in range(self.max_iter):  # 循环执行最大迭代次数
             node_array = self.build_node_array(self.nodes_list)
             # 随机采样
@@ -85,7 +87,7 @@ class VRRT_star_APF:
             
             # 碰撞检测：新节点——终点
             goal_collision_results = self.check_collision_vectorized(new_nodes_list, goal_nodes_list)
-        
+            
             # 寻找临近节点索引
             near_inds = self.find_near_nodes_vectorized(new_nodes_list, node_array)
             # 选择最佳父节点（已包含碰撞检测）
@@ -98,7 +100,7 @@ class VRRT_star_APF:
                     # 重连接
                     self.rewire(new_node, near_inds[j], self.nodes_list[j])
                     
-                    # 未找到路径时，检查是否可直接连接到目标节点
+                    # 未找到路径时
                     if not first_path_found[j] and goal_collision_results[j] and self.calc_distance(new_node, goal_nodes_list[j]) < 10 * self.expand_dis:
                         first_path_found[j] = True
                         goal_nodes_list[j].parent = new_node
@@ -109,33 +111,41 @@ class VRRT_star_APF:
                         first_path[j] = self.generate_final_path_from_node(goal_nodes_list[j])
                         path_length_list[j] = calculate_path_length(first_path[j])
                         
-                        # 首次找到路径的迭代轮数与时间
+                        # 首次找到路径的迭代轮数
                         iteration_find_path[j] = i
-                        end_time = time.time()
-                        time_first = end_time - start_time
                         
-                        if all(first_path_found):
-                            # 合并所有航路段
-                            combined_path = []
-                            for seg in first_path:
-                                if combined_path and combined_path[-1] == seg[0]:
-                                    combined_path.extend(seg[1:])
-                                else:
-                                    combined_path.extend(seg)
-                                    
-                            # 找到首次路径就停止
-                            if not self.search_until_max_iter:
-                                return first_path_found, time_first_list, iteration_find_path, path_length_list, combined_path, combined_path
+                        best_costs[j] = path_length_list[j]
+                        best_paths[j] = first_path[j]
+                        
+                    if self.search_until_max_iter and first_path_found[j]:
+                        # 重新计算当前路径成本
+                        current_cost = goal_nodes_list[j].cost
+                        if current_cost < best_costs[j]:
+                            best_costs[j] = current_cost
+                            best_paths[j] = self.generate_final_path_from_node(goal_nodes_list[j])
+                            
+            if not self.search_until_max_iter and all(first_path_found):
+                # 合并所有航路段
+                combined_path = []
+                for seg in first_path:
+                    if combined_path and combined_path[-1] == seg[0]:
+                        combined_path.extend(seg[1:])
+                    else:
+                        combined_path.extend(seg)
+                return first_path_found, time_first_list, iteration_find_path, path_length_list, path_length_list, combined_path, combined_path
 
-        last_index = None
-        if last_index is not None:
+        if all(best_paths):
             # 用剩余迭代次数优化后的路径
-            final_best_path = self.generate_final_path_from_node(last_index)
-            # 补充终点
-            final_best_path.append([self.goal.x, self.goal.y, self.goal.z])
-            return time_first, iteration_find_path, first_path, final_best_path 
+            final_combined_path = []
+            for seg in best_paths:
+                if final_combined_path and final_combined_path[-1] == seg[0]:
+                    final_combined_path.extend(seg[1:])
+                else:
+                    final_combined_path.extend(seg)
 
-        return None, None, None, None, None, None
+            return first_path_found, time_first_list, iteration_find_path, path_length_list, best_costs, final_combined_path, final_combined_path
+        
+        return None, None, None, None, None, None, None
     
     def build_node_array(self, nodes_list):
         max_len = max(len(tree) for tree in nodes_list)
@@ -186,7 +196,7 @@ class VRRT_star_APF:
         samples = mins + random_points * (maxs_expanded - mins_expanded)
         
         return samples
-    
+
     def get_nearest_node_index(self, node_array, rnd_array):
         """
         找到N-1棵树中，距离N-1个随机点最近的节点的索引
@@ -225,7 +235,7 @@ class VRRT_star_APF:
         # 目标点引力方向
         goal_dir = goal_coords - from_coords
         goal_dist = np.linalg.norm(goal_dir, axis=1, keepdims=True)
-        goal_unit = np.where(goal_dist > 0, goal_dir / goal_dist, 0.0)
+        goal_unit = np.divide(goal_dir, goal_dist, where=goal_dist > 0, out=np.zeros_like(goal_dir))
 
         # 障碍物斥力
         repulsion = np.zeros_like(from_coords)
@@ -560,11 +570,9 @@ if __name__ == '__main__':
         r_risk_range=(3, 7),
         zmax_range=(30, 240),
         max_iter=10000,
-        seed=40
+        seed=2
     )
-    waypoints = [[0, 0, 0],
-                 [900, 600, 0],
-                 [1500, 1500, 100]]
+    waypoints = [[0, 0, 0], [650, 380, 0], [1000, 680, 0], [1200, 1100, 0], [1500, 1500, 100]]
     obstacle_list = env_map["obstacles"]
     print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。")
     # plot_map_and_waypoint(env_map, waypoints)
@@ -575,7 +583,7 @@ if __name__ == '__main__':
     env_results = []
     
     # 规划次数
-    num_of_tests = 5000
+    num_of_tests = 10
     # 测评指标
     success_count = 0
     total_time_first = []      # 首次找到路径的总耗时
@@ -583,7 +591,10 @@ if __name__ == '__main__':
     total_iter_needed = []     # 完成规划时，所有航路段的最大迭代次数
     total_length_first = []    # 首次规划的路径总长度
     total_length_final = []    # 最终规划的路径总长度
+    
     time_segments = []          # 每个航段的规划时间
+    length_segments = []        # 每个航段的首次长度
+    length_segments_final = []  # 每个航段的最终长度
     
     for j in range(num_of_tests):
         # 初始化 RRT*
@@ -594,19 +605,20 @@ if __name__ == '__main__':
             R_crash=r_agent_crash, 
             R_risk=r_agent_risk, 
             obstacle_list=obstacle_list, 
-            expand_dis=15,
+            expand_dis=30,
             search_radius=30,
-            max_iter=10000
+            max_iter=2000,
+            search_until_max_iter=True
         )
         start_time = time.time()
-        first_path_found, time_first, iteration_find_path, path_length_list, first_path, final_best_path = rrt_star.planning()
+        first_path_found, time_first, iteration_find_path, path_length_list, path_length_final, first_path, final_best_path = rrt_star.planning()
         end_time = time.time()
         
         # 打印单次结果
         num_segments = len(first_path_found)
-        print("-" * 50)
-        print(f"{'航段':<4} | {'状态':<4} | {'迭代轮次':<3} | {'规划时间':<4} | {'路径长度':<4}")
-        print("-" * 50)
+        print("-" * 55)
+        print(f"{'航段':<2} | {'状态':<2} | {'迭代轮次':<3} | {'规划时间':<4} | {'首次长度':<4} | {'最终长度':<4}")
+        print("-" * 55)
         for i in range(num_segments):
             success = first_path_found[i]
             status = "成功" if success else "失败"
@@ -615,10 +627,12 @@ if __name__ == '__main__':
             # 规划时间
             time_val = f"{time_first[i]:.3f}" if success and time_first[i] is not None else "N/A"
             # 路径长度
-            length_val = f"{path_length_list[i]:.2f}" if success else "N/A"
+            length_val = f"{path_length_list[i]:.1f}" if success else "N/A"
+            # 最终长度
+            length_final = f"{path_length_final[i]:.1f}" if success else "N/A"
             # 航段编号
-            print(f"{i+1:<6} | {status:<4} | {iter_val:<8} | {time_val:<8} | {length_val:<8}")
-        print("-" * 50)
+            print(f"{i+1:<4} | {status:<2} | {iter_val:<8} | {time_val:<8} | {length_val:<8} | {length_final:<8}")
+        print("-" * 55)
         
         all_success = all(first_path_found)
         
@@ -626,14 +640,17 @@ if __name__ == '__main__':
             max_iter_needed = np.max(iteration_find_path)
             total_time = end_time - start_time
             total_length = sum([path_length_list[i] for i in range(len(path_length_list)) if first_path_found[i]])
-            print(f"总耗时：{total_time:.3f}s")
-            print(f"总长度：{total_length:.2f}")
+            print(f"最终耗时：{total_time:.3f}s")
+            print(f"首次长度：{total_length:.2f}")
             # plot_tree_and_path(env_map, rrt_star.nodes_list, final_best_path, waypoints)
             success_count += 1
             total_time_first.append(total_time)
             total_iter_needed.append(max_iter_needed)
             total_length_first.append(total_length)
+            
             time_segments.append(time_first)
+            length_segments.append(path_length_list)
+            length_segments_final.append(path_length_final)
             print(f"当前平均耗时：{sum(total_time_first) / success_count:.3f}s")
             
     print("=" * 30)
@@ -643,7 +660,7 @@ if __name__ == '__main__':
         avg_iter = sum(total_iter_needed) / success_count
         avg_length_first = sum(total_length_first) / success_count
         
-        print(f"APF-VRRT*: 步长 {rrt_star.expand_dis}, 搜索半径{rrt_star.search_radius}")
+        print(f"VRRT*: 步长 {rrt_star.expand_dis}, 搜索半径{rrt_star.search_radius}")
         print(f"成功率: {avg_success_rate:.1f}%")
         print(f"平均迭代次数: {avg_iter:.1f}")
         print(f"平均耗时: {avg_time_first:.4f} s")
@@ -655,15 +672,36 @@ if __name__ == '__main__':
     # 每段航路的平均用时
     if success_count > 0:
         num_segments = len(time_segments[0])
-        averages = []
+        average_times = []
+        average_lengths_first = []
+        average_lengths_final = []
         for i in range(num_segments):
+            # 平均首次时间
             segment_times = [trial[i] for trial in time_segments]
-            avg = sum(segment_times) / len(segment_times)
-            averages.append(avg)
-        
-        print("-" * 20)
-        print(f"{'航段':<4} | {'平均时间':<4}")
-        print("-" * 20)
-        for idx, avg in enumerate(averages, start=1):
-            print(f"{idx:<6} | {avg:<8.3f}")
-        print("-" * 20)
+            avg_time = sum(segment_times) / len(segment_times)
+            average_times.append(avg_time)
+            
+            # 平均首次长度
+            segment_lengths_first = [trial[i] for trial in length_segments]
+            avg_len_first = sum(segment_lengths_first) / len(segment_lengths_first)
+            average_lengths_first.append(avg_len_first)
+            
+            # 平均最终长度
+            segment_lengths_final = [trial[i] for trial in length_segments_final]
+            avg_len_final = sum(segment_lengths_final) / len(segment_lengths_final)
+            average_lengths_final.append(avg_len_final)
+
+        print("-" * 60)
+        print(f"{'航段':<4} | {'首次时间':<4} | {'首次长度':<4} | {'最终长度':<4} | {'优化比例':<4}")
+        print("-" * 60)
+        for idx in range(num_segments):
+            avg_t = average_times[idx]
+            avg_f = average_lengths_first[idx]
+            avg_ff = average_lengths_final[idx]
+            # 计算优化比例
+            if avg_f != 0:
+                improvement = (avg_f - avg_ff) / avg_f * 100
+            else:
+                improvement = 0.0
+            print(f"{idx+1:<6} | {avg_t:<8.3f} | {avg_f:<8.3f} | {avg_ff:<8.3f} | {improvement:<6.2f}%")
+        print("-" * 60)

@@ -18,7 +18,7 @@ class Node:
 
 # 定义 RRT 类，用于实现 RRT 算法
 class VRRT:
-    def __init__(self, env_map, waypoints, R_crash, R_risk, obstacle_list, expand_dis=25, max_iter=1500, search_until_max_iter=False):
+    def __init__(self, env_map, waypoints, R_crash, R_risk, obstacle_list, expand_dis=25, max_iter=1500):
         """
         初始化 RRT 算法的参数
         :param env_map: 环境地图
@@ -39,7 +39,6 @@ class VRRT:
         self.nodes_list = []                    # 树节点列表，初始化为空列表
         self.R_crash = R_crash                 # 本体碰撞半径
         self.R_risk = R_risk                   # 本体风险半径
-        self.search_until_max_iter = search_until_max_iter  # 是否持续搜索直到最大迭代次数
 
     def planning(self):
         """
@@ -69,7 +68,6 @@ class VRRT:
         path_length_list = [None] * num_trees
         
         start_time = time.time()
-        
         for i in range(self.max_iter):  # 循环执行最大迭代次数
             node_array = self.build_node_array(self.nodes_list)
             # 随机采样
@@ -82,57 +80,43 @@ class VRRT:
             # 计算扩展方向并生成新节点
             new_nodes_list = self.steer(nearest_nodes_list, random_nodes_array)
             
-            # 碰撞检测
+            # 碰撞检测：最近节点-新节点
             collision_results = self.check_collision_vectorized(nearest_nodes_list, new_nodes_list)
             
-            # 判断新节点是否可以直连终点
+            # 碰撞检测：新节点——终点
             goal_collision_results = self.check_collision_vectorized(new_nodes_list, goal_nodes_list)
             
             # 检查新节点是否与障碍物碰撞
-            for j, node in enumerate(new_nodes_list):
+            for j, new_node in enumerate(new_nodes_list):
                 # 无碰撞，将新节点加入树
                 if collision_results[j]:
-                    self.nodes_list[j].append(node)
+                    self.nodes_list[j].append(new_node)
                     
-                # 未找到路径时
-                if not first_path_found[j]:
-                    
-                    # 若存在可直连的节点
-                    if goal_collision_results[j] and collision_results[j] and self.calc_distance(node, goal_nodes_list[j]) < 10 * self.expand_dis:
+                    # 未找到路径时
+                    if not first_path_found[j] and goal_collision_results[j] and self.calc_distance(new_node, goal_nodes_list[j]) < 10 * self.expand_dis:
                         first_path_found[j] = True
+                        goal_nodes_list[j].parent = new_node
+                        self.nodes_list[j].append(goal_nodes_list[j])
                         elapsed = time.time() - start_time
                         time_first_list[j] = elapsed
                         # 生成路径
-                        first_path[j] = self.generate_final_path_from_node(new_nodes_list[j])
-                        # 补充终点
-                        first_path[j].append([goal_nodes_list[j].x, goal_nodes_list[j].y, goal_nodes_list[j].z])
+                        first_path[j] = self.generate_final_path_from_node(goal_nodes_list[j])
                         path_length_list[j] = calculate_path_length(first_path[j])
                         
-                        # 首次找到路径的迭代轮数与时间
+                        # 首次找到路径的迭代轮数
                         iteration_find_path[j] = i
                         
-                        if all(first_path_found):
-                            # 合并所有航路段
-                            combined_path = []
-                            for seg in first_path:
-                                if combined_path and combined_path[-1] == seg[0]:
-                                    combined_path.extend(seg[1:])
-                                else:
-                                    combined_path.extend(seg)
-                                    
-                            # 找到首次路径就停止
-                            if not self.search_until_max_iter:
-                                return first_path_found, time_first_list, iteration_find_path, path_length_list, combined_path, combined_path
+            if all(first_path_found):
+                # 合并所有航路段
+                combined_path = []
+                for seg in first_path:
+                    if combined_path and combined_path[-1] == seg[0]:
+                        combined_path.extend(seg[1:])
+                    else:
+                        combined_path.extend(seg)
+                return first_path_found, time_first_list, iteration_find_path, path_length_list, combined_path
 
-        last_index = None
-        if last_index is not None:
-            # 用剩余迭代次数优化后的路径
-            final_best_path = self.generate_final_path_from_node(last_index)
-            # 补充终点
-            final_best_path.append([self.goal.x, self.goal.y, self.goal.z])
-            return time_first, iteration_find_path, first_path, final_best_path 
-
-        return None, None, None, None, None, None
+        return None, None, None, None, None
     
     def build_node_array(self, nodes_list):
         max_len = max(len(tree) for tree in nodes_list)
@@ -377,7 +361,7 @@ if __name__ == '__main__':
     env_results = []
     
     # 规划次数
-    num_of_tests = 3000
+    num_of_tests = 10
     # 测评指标
     success_count = 0
     total_time_first = []      # 首次找到路径的总耗时
@@ -395,11 +379,11 @@ if __name__ == '__main__':
             R_crash=r_agent_crash, 
             R_risk=r_agent_risk, 
             obstacle_list=obstacle_list, 
-            expand_dis=50,
+            expand_dis=30,
             max_iter=10000
         )
         start_time = time.time()
-        first_path_found, time_first, iteration_find_path, path_length_list, first_path, final_best_path = rrt_star.planning()
+        first_path_found, time_first, iteration_find_path, path_length_list, first_path = rrt_star.planning()
         end_time = time.time()
         
         # 打印单次结果
@@ -441,7 +425,7 @@ if __name__ == '__main__':
         avg_time_first = sum(total_time_first) / success_count
         avg_iter = sum(total_iter_needed) / success_count
         avg_length_first = sum(total_length_first) / success_count
-        print(f"VRRT步长：{rrt_star.expand_dis}")
+        print(f"VRRT：步长 {rrt_star.expand_dis}")
         print(f"成功率: {avg_success_rate:.1f}%")
         print(f"平均迭代次数: {avg_iter:.1f}")
         print(f"平均耗时: {avg_time_first:.4f} s")

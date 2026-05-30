@@ -18,7 +18,7 @@ class Node:
 
 # 定义 RRT 类，用于实现 RRT 算法
 class VRRT_star:
-    def __init__(self, env_map, waypoints, R_crash, R_risk, obstacle_list, expand_dis=25, max_iter=1500, search_radius=110, search_until_max_iter=False):
+    def __init__(self, env_map, waypoints, R_crash, R_risk, obstacle_list, expand_dis=25, max_iter=1500, search_radius=110, search_until_max_iter=True):
         """
         初始化 RRT 算法的参数
         :param env_map: 环境地图
@@ -36,7 +36,8 @@ class VRRT_star:
         self.expand_dis = expand_dis           # 每次扩展的步长
         self.max_iter = max_iter               # 最大迭代次数
         self.obstacle_list = obstacle_list     # 存储障碍物列表
-        self.nodes_list = []                    # 树节点列表，初始化为空列表
+        self.nodes_list_a = []                 # 树节点列表，初始化为空列表
+        self.nodes_list_b = []
         self.R_crash = R_crash                 # 本体碰撞半径
         self.R_risk = R_risk                   # 本体风险半径
         self.search_radius = search_radius     # 搜索邻近节点的半径
@@ -49,20 +50,15 @@ class VRRT_star:
         """
         # 转换为 (n,3) 数组
         waypoints_array = np.array(self.waypoints)
-        # 去除终点，添加新维度得 [[[x1,y1,z1]],[[x2,y2,z2]],...]
-        node_array = waypoints_array[:-1, np.newaxis, :]
-        # 创建起点Node类列表[[[start]], [[start*]], [[start**]], ...]
-        self.nodes_list = [[Node(coord[0], coord[1], coord[2])] for coord in node_array[:, 0, :]]
+        # 起点、终点列表 [[[x1,y1,z1]],[[x2,y2,z2]],...]
+        node_array_a = waypoints_array[:-1, np.newaxis, :]
+        node_array_b = waypoints_array[1:, np.newaxis, :]
+        # 起点、终点Node类列表[[[start]], [[start*]], [[start**]], ...]
+        self.nodes_list_a = [[Node(coord[0], coord[1], coord[2])] for coord in node_array_a[:, 0, :]]
+        self.nodes_list_b = [[Node(coord[0], coord[1], coord[2])] for coord in node_array_b[:, 0, :]]
         
-        num_trees = len(self.nodes_list)
-        # 终点节点列表
-        goal_nodes_list = []
-        for i in range(1, num_trees + 1):
-            node = Node(waypoints_array[i, 0], waypoints_array[i, 1], waypoints_array[i, 2])
-            node.parent = None
-            node.cost = float('inf')
-            goal_nodes_list.append(node)
-            
+        num_trees = len(self.nodes_list_a)
+        
         first_path_found = np.full(num_trees, False, dtype=bool)
         first_path = np.full(num_trees, None, dtype=object)
         iteration_find_path = np.zeros(num_trees, dtype=int)
@@ -73,57 +69,84 @@ class VRRT_star:
         best_costs = [np.inf] * num_trees
         
         start_time = time.time()
+        
         for i in range(self.max_iter):  # 循环执行最大迭代次数
-            node_array = self.build_node_array(self.nodes_list)
+            node_array_a = self.build_node_array(self.nodes_list_a)
+            node_array_b = self.build_node_array(self.nodes_list_b)
             # 随机采样
             random_nodes_array = self.sample_free_vectorized(waypoints_array)
 
+            # 已找到路径的航段替换为椭球采样
+            if self.search_until_max_iter:
+                for j in range(num_trees):
+                    if first_path_found[j]:
+                        # 获取起点、终点
+                        start = waypoints_array[j]
+                        goal = waypoints_array[j + 1]
+                        # 使用当前最优成本作为椭球长轴参数
+                        c_max = best_costs[j]
+                        # 生成椭球内采样点并替换
+                        random_nodes_array[j] = self._sample_informed_ellipsoid(start, goal, c_max)
+
             # 找到距离随机点最近的已有节点
-            nearest_ind = self.get_nearest_node_index(node_array, random_nodes_array)
-            nearest_nodes_list = [self.nodes_list[i][nearest_ind[i]] for i in range(len(nearest_ind))]
-            
+            nearest_ind = self.get_nearest_node_index(node_array_a, random_nodes_array)
+            nearest_nodes_list = [self.nodes_list_a[i][nearest_ind[i]] for i in range(len(nearest_ind))]
+
             # 计算扩展方向并生成新节点
             new_nodes_list = self.steer(nearest_nodes_list, random_nodes_array)
             
-            # 碰撞检测：新节点——终点
-            goal_collision_results = self.check_collision_vectorized(new_nodes_list, goal_nodes_list)
+            # 找到距离新节点最近的另一棵树中的节点
+            new_nodes_array = np.array([[node.x, node.y, node.z] for node in new_nodes_list])
+            nearest_connect_ind = self.get_nearest_node_index(node_array_b, new_nodes_array)
+            nearest_connect_nodes_list = [self.nodes_list_b[i][nearest_connect_ind[i]] for i in range(len(nearest_connect_ind))]
+            # 碰撞检测：新节点——连接节点
+            goal_collision_results = self.check_collision_vectorized(new_nodes_list, nearest_connect_nodes_list)
             
             # 寻找临近节点索引
-            near_inds = self.find_near_nodes_vectorized(new_nodes_list, node_array)
+            near_inds = self.find_near_nodes_vectorized(new_nodes_list, node_array_a)
             # 选择最佳父节点（已包含碰撞检测）
             new_nodes_list = self.choose_best_parent(new_nodes_list, nearest_nodes_list, near_inds)
             
             for j, new_node in enumerate(new_nodes_list):
                 # 有最佳父节点，表明无碰撞，将新节点加入树
                 if new_node.parent is not None:
-                    self.nodes_list[j].append(new_node)
+                    self.nodes_list_a[j].append(new_node)
                     # 重连接
-                    self.rewire(new_node, near_inds[j], self.nodes_list[j])
+                    self.rewire(new_node, near_inds[j], self.nodes_list_a[j])
                     
-                    # 未找到路径时
-                    if not first_path_found[j] and goal_collision_results[j] and self.calc_distance(new_node, goal_nodes_list[j]) < 10 * self.expand_dis:
-                        first_path_found[j] = True
-                        goal_nodes_list[j].parent = new_node
-                        self.nodes_list[j].append(goal_nodes_list[j])
-                        elapsed = time.time() - start_time
-                        time_first_list[j] = elapsed
+                    # 检查是否可直接连接到另一棵树的最近节点
+                    if goal_collision_results[j] and self.calc_distance(new_node, nearest_connect_nodes_list[j]) < 10 * self.expand_dis:
                         # 生成路径
-                        first_path[j] = self.generate_final_path_from_node(goal_nodes_list[j])
-                        path_length_list[j] = calculate_path_length(first_path[j])
-                        
-                        # 首次找到路径的迭代轮数
-                        iteration_find_path[j] = i
-                        
-                        best_costs[j] = path_length_list[j]
-                        best_paths[j] = first_path[j]
-                        
-                    if self.search_until_max_iter and first_path_found[j]:
-                        # 重新计算当前路径成本
-                        current_cost = goal_nodes_list[j].cost
-                        if current_cost < best_costs[j]:
-                            best_costs[j] = current_cost
-                            best_paths[j] = self.generate_final_path_from_node(goal_nodes_list[j])
+                        root_a = self.nodes_list_a[j][0]
+                        start_pt = waypoints_array[j]
+                        if (root_a.x, root_a.y, root_a.z) == (start_pt[0], start_pt[1], start_pt[2]):
+                            # 当前树是起点树
+                            path_forward = self.generate_final_path_from_node(new_node)
+                            path_backward = self.generate_final_path_from_node(nearest_connect_nodes_list[j])[::-1]
                             
+                        else:
+                            # 当前树是终点树，交换路径顺序
+                            path_forward = self.generate_final_path_from_node(nearest_connect_nodes_list[j])
+                            path_backward = self.generate_final_path_from_node(new_node)[::-1]
+                        full_path = path_forward + path_backward
+                        path_cost = calculate_path_length(full_path)
+                        
+                        # 首次找到路径
+                        if not first_path_found[j]:
+                            first_path_found[j] = True
+                            time_first_list[j] = time.time() - start_time
+                            iteration_find_path[j] = i
+                            first_path[j] = full_path
+                            path_length_list[j] = path_cost
+                            
+                            best_costs[j] = path_length_list[j]
+                            best_paths[j] = first_path[j]
+                            
+                        if self.search_until_max_iter and first_path_found[j]:
+                            if path_cost < best_costs[j]:
+                                best_costs[j] = path_cost
+                                best_paths[j] = full_path
+                                
             if not self.search_until_max_iter and all(first_path_found):
                 # 合并所有航路段
                 combined_path = []
@@ -133,6 +156,8 @@ class VRRT_star:
                     else:
                         combined_path.extend(seg)
                 return first_path_found, time_first_list, iteration_find_path, path_length_list, path_length_list, combined_path, combined_path
+            
+            self.nodes_list_a, self.nodes_list_b = self.nodes_list_b, self.nodes_list_a
 
         if all(best_paths):
             # 用剩余迭代次数优化后的路径
@@ -144,8 +169,57 @@ class VRRT_star:
                     final_combined_path.extend(seg)
 
             return first_path_found, time_first_list, iteration_find_path, path_length_list, best_costs, final_combined_path, final_combined_path
-        
+
         return None, None, None, None, None, None, None
+
+    def _sample_informed_ellipsoid(self, start, goal, c_max):
+        """
+        在以 start 和 goal 为焦点、c_max 为椭圆长轴的椭球内均匀采样一个点。
+        当 c_max 接近两焦点距离时退化为线段采样。
+        """
+        start = np.array(start)
+        goal = np.array(goal)
+        d = np.linalg.norm(goal - start)
+        if c_max <= d:
+            # 退化情况：椭球退化为线段，直接在线段上随机采样
+            t = np.random.uniform(0, 1)
+            return start + t * (goal - start)
+
+        # 椭球中心
+        center = (start + goal) / 2.0
+        # 焦点半距
+        c_foci = d / 2.0
+        # 长半轴
+        a = c_max / 2.0
+        # 短半轴
+        b = np.sqrt(a**2 - c_foci**2)
+
+        # 建立局部坐标系：x 轴指向 goal-start 方向
+        dir_vec = (goal - start) / d
+        # 构造两个正交方向（任意但与 dir_vec 正交）
+        if abs(dir_vec[0]) > 1e-6 or abs(dir_vec[1]) > 1e-6:
+            u2 = np.array([-dir_vec[1], dir_vec[0], 0.0])
+        else:
+            u2 = np.array([1.0, 0.0, 0.0])
+        u2 = u2 / np.linalg.norm(u2)
+        u3 = np.cross(dir_vec, u2)
+        u3 = u3 / np.linalg.norm(u3)
+        # 旋转矩阵：列向量为局部坐标系的基
+        L = np.column_stack((dir_vec, u2, u3))
+        # 缩放矩阵
+        S = np.diag([a, b, b])
+
+        # 在单位球内均匀采样
+        # 随机方向
+        dir_random = np.random.randn(3)
+        dir_random = dir_random / np.linalg.norm(dir_random)
+        # 半径按体积分布：r = U(0,1)^{1/3}
+        r = np.cbrt(np.random.uniform(0, 1))
+        x_ball = dir_random * r
+
+        # 变换到椭球坐标
+        sample = center + L @ (S @ x_ball)
+        return sample
     
     def build_node_array(self, nodes_list):
         max_len = max(len(tree) for tree in nodes_list)
@@ -272,7 +346,7 @@ class VRRT_star:
         :return: 更新后的新节点
         """
         for i, new_node in enumerate(new_nodes_list):
-            node_list = self.nodes_list[i]
+            node_list = self.nodes_list_a[i]
             # 候选父节点
             candidates = set()
             candidates.add(nearest_nodes_list[i])
@@ -564,7 +638,7 @@ if __name__ == '__main__':
             R_crash=r_agent_crash, 
             R_risk=r_agent_risk, 
             obstacle_list=obstacle_list, 
-            expand_dis=30,
+            expand_dis=10,
             search_radius=30,
             max_iter=2000,
             search_until_max_iter=True
@@ -601,7 +675,7 @@ if __name__ == '__main__':
             total_length = sum([path_length_list[i] for i in range(len(path_length_list)) if first_path_found[i]])
             print(f"最终耗时：{total_time:.3f}s")
             print(f"首次长度：{total_length:.2f}")
-            # plot_tree_and_path(env_map, rrt_star.nodes_list, final_best_path, waypoints)
+            # plot_tree_and_path(env_map, rrt_star.nodes_list_a, final_best_path, waypoints)
             success_count += 1
             total_time_first.append(total_time)
             total_iter_needed.append(max_iter_needed)
@@ -619,7 +693,7 @@ if __name__ == '__main__':
         avg_iter = sum(total_iter_needed) / success_count
         avg_length_first = sum(total_length_first) / success_count
         
-        print(f"VRRT*: 步长 {rrt_star.expand_dis}, 搜索半径{rrt_star.search_radius}")
+        print(f"Bi-VRRT*: 步长 {rrt_star.expand_dis}, 搜索半径{rrt_star.search_radius}")
         print(f"成功率: {avg_success_rate:.1f}%")
         print(f"平均迭代次数: {avg_iter:.1f}")
         print(f"平均耗时: {avg_time_first:.4f} s")
