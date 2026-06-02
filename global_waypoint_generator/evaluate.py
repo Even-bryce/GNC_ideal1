@@ -77,43 +77,30 @@ def extract_waypoints(points_norm, scores, map_dim, eps=0.02, peak_radius=0.02):
 
 
 
-def extract_waypoints_knn_astar(points_norm, scores, start_pt, goal_pt, k_neighbors=10, epsilon=0.05, visualize=True):
+def extract_waypoints_knn_astar(points_norm, scores, start_pt, goal_pt, k_neighbors=10, epsilon=0.05, max_segment_length=0.3, visualize=True):
     """
-    策略一：KNN建图 + 连通分量桥接 + A*搜索 + RDP抽稀
+    策略一：KNN建图 + 连通分量桥接 + A*搜索 + RDP抽稀 + 长航段均匀化吸附 (区分点类型可视化)
     """
     def rdp(points, epsilon):
-        """
-        道格拉斯-普克 (RDP) 算法：用于抽稀密集的路径点，提取真正的折线航路点（拐点）
-        """
-        if len(points) <= 2:
-            return points
-
+        if len(points) <= 2: return points
         dmax = 0.0
         index = 0
         end = len(points) - 1
-        
         line_vec = points[end] - points[0]
         line_len = np.linalg.norm(line_vec)
-        
-        if line_len == 0:
-            return np.array([points[0], points[end]])
-
+        if line_len == 0: return np.array([points[0], points[end]])
         line_unitvec = line_vec / line_len
-
         for i in range(1, end):
             vec_to_pt = points[i] - points[0]
             proj_len = np.dot(vec_to_pt, line_unitvec)
             closest_point = points[0] + proj_len * line_unitvec
             d = np.linalg.norm(points[i] - closest_point)
-            
             if d > dmax:
                 index = i
                 dmax = d
-
         if dmax > epsilon:
             left_results = rdp(points[:index+1], epsilon)
             right_results = rdp(points[index:], epsilon)
-            # 拼接时去掉重复的中间断点
             return np.vstack((left_results[:-1], right_results))
         else:
             return np.array([points[0], points[end]])
@@ -121,6 +108,7 @@ def extract_waypoints_knn_astar(points_norm, scores, start_pt, goal_pt, k_neighb
     if len(points_norm) == 0:
         return np.array([start_pt, goal_pt])
 
+    # ================= 1 & 2 & 3. 基础建图与寻路 =================
     max_score_val = np.max(scores) if len(scores) > 0 else 1.0
     all_points = np.vstack([start_pt, points_norm, goal_pt])
     all_scores = np.concatenate([[max_score_val * 1.5], scores, [max_score_val * 1.5]]) 
@@ -130,7 +118,6 @@ def extract_waypoints_knn_astar(points_norm, scores, start_pt, goal_pt, k_neighb
     goal_idx = N - 1
     actual_k = min(k_neighbors + 1, N) 
 
-    # 1. KNN 建图
     tree = KDTree(all_points)
     G = nx.Graph()
     distances, indices = tree.query(all_points, k=actual_k)
@@ -141,7 +128,6 @@ def extract_waypoints_knn_astar(points_norm, scores, start_pt, goal_pt, k_neighb
                 cost = d / (avg_score + 1e-5) 
                 G.add_edge(i, j, weight=cost)
 
-    # 2. 连通分量桥接
     components = list(nx.connected_components(G))
     while len(components) > 1:
         comp_a = list(components[0])
@@ -163,7 +149,6 @@ def extract_waypoints_knn_astar(points_norm, scores, start_pt, goal_pt, k_neighb
         G.add_edge(node_a, node_rest, weight=bridge_cost)
         components = list(nx.connected_components(G))
 
-    # 3. A* 搜索得到密集路径 (dense_path)
     def astar_heuristic(node, target):
         dist_to_goal = np.linalg.norm(all_points[node] - all_points[target])
         return dist_to_goal / (max_score_val * 1.5 + 1e-5)
@@ -178,12 +163,45 @@ def extract_waypoints_knn_astar(points_norm, scores, start_pt, goal_pt, k_neighb
     
     dense_path = all_points[path_indices]
 
-    # 4. RDP 抽稀提取真正的航路点
+    # ================= 4. RDP 抽稀提取骨架拐点 =================
     waypoints_seq = rdp(dense_path, epsilon=epsilon)
+    
+    # 默认全部标记为 0 (代表 RDP 拐点)
+    point_types = np.zeros(len(waypoints_seq), dtype=int) 
 
-    # ==========================================
-    # 5. 内置可视化模块 (针对 Debug)
-    # ==========================================
+    # ================= 5. 长航段均匀化与物理点吸附 =================
+    if max_segment_length is not None and len(points_norm) > 0:
+        safe_space_tree = KDTree(points_norm) 
+        
+        final_waypoints = [waypoints_seq[0]]
+        final_types = [0] # 起点视为 RDP 骨架点
+
+        for i in range(len(waypoints_seq) - 1):
+            p1 = waypoints_seq[i]
+            p2 = waypoints_seq[i+1]
+            dist = np.linalg.norm(p2 - p1)
+
+            if dist > max_segment_length:
+                num_segments = int(np.ceil(dist / max_segment_length))
+                alphas = np.linspace(0, 1, num_segments + 1)[1:-1]
+                
+                for alpha in alphas:
+                    math_pt = p1 + alpha * (p2 - p1)
+                    _, nearest_idx = safe_space_tree.query(math_pt)
+                    snapped_pt = points_norm[nearest_idx]
+
+                    if not np.allclose(snapped_pt, final_waypoints[-1]):
+                        final_waypoints.append(snapped_pt)
+                        final_types.append(1) # 标记为 1 (代表插值点)
+
+            if not np.allclose(p2, final_waypoints[-1]):
+                final_waypoints.append(p2)
+                final_types.append(0) # 标记为 0 (代表 RDP 拐点)
+
+        waypoints_seq = np.array(final_waypoints)
+        point_types = np.array(final_types)
+
+    # ================= 6. 可视化模块 (分色展示) =================
     if visualize:
         import matplotlib.pyplot as plt
         from mpl_toolkits.mplot3d import Axes3D
@@ -191,31 +209,52 @@ def extract_waypoints_knn_astar(points_norm, scores, start_pt, goal_pt, k_neighb
         fig = plt.figure(figsize=(10, 8))
         ax = fig.add_subplot(111, projection='3d')
 
-        # [图层 1] 模型预测点云 (浅灰色)
+        # 图层1：模型预测点云
         ax.scatter(points_norm[:, 0], points_norm[:, 1], points_norm[:, 2], 
                    c='gray', marker='.', alpha=0.3, label='Predicted Points')
 
-        # [图层 2] A* 密集路径 dense_path (青色虚线)
+        # 图层2：A* 密集路径
         if len(dense_path) > 1:
             ax.plot(dense_path[:, 0], dense_path[:, 1], dense_path[:, 2], 
-                    c='cyan', linestyle='--', linewidth=1.5, alpha=0.8, label='A* Dense Path')
+                    c='cyan', linestyle='--', linewidth=1.5, alpha=0.6, label='A* Dense Path')
 
-        # [图层 3] 最终航路点 waypoints_seq (深蓝色粗实线 + 橙色拐点)
         if len(waypoints_seq) > 1:
+            # 绘制整体轨迹主线
             ax.plot(waypoints_seq[:, 0], waypoints_seq[:, 1], waypoints_seq[:, 2], 
-                    c='blue', linewidth=2.5, label='RDP Final Waypoints')
+                    c='blue', linewidth=2.5, label='Final Trajectory')
+            
+            # 剥离起终点，只对中间点进行分色标注
             if len(waypoints_seq) > 2:
-                ax.scatter(waypoints_seq[1:-1, 0], waypoints_seq[1:-1, 1], waypoints_seq[1:-1, 2], 
-                           c='orange', s=60, marker='^', zorder=5, label='Turning Nodes')
+                mid_pts = waypoints_seq[1:-1]
+                mid_types = point_types[1:-1]
+                
+                rdp_mask = (mid_types == 0)
+                interp_mask = (mid_types == 1)
+                
+                # 图层3：绘制 RDP 骨架拐点 (橙色大三角)
+                if np.any(rdp_mask):
+                    rdp_pts = mid_pts[rdp_mask]
+                    ax.scatter(rdp_pts[:, 0], rdp_pts[:, 1], rdp_pts[:, 2], 
+                               c='orange', s=80, marker='^', zorder=6, label='RDP Turning Nodes')
+                
+                # 图层4：绘制 插值吸附点 (紫色小圆点)
+                if np.any(interp_mask):
+                    interp_pts = mid_pts[interp_mask]
+                    ax.scatter(interp_pts[:, 0], interp_pts[:, 1], interp_pts[:, 2], 
+                               c='purple', s=40, marker='o', zorder=5, label='Interpolated Snaps')
 
-        # [图层 4] 起点与终点
-        ax.scatter(*start_pt, c='green', s=100, marker='o', zorder=10, label='Start')
+        # 图层5：起点终点
+        ax.scatter(*start_pt, c='green', s=100, marker='s', zorder=10, label='Start')
         ax.scatter(*goal_pt, c='red', s=100, marker='*', zorder=10, label='Goal')
 
-        ax.set_title(f'A* Path vs RDP Waypoints (epsilon={epsilon})')
+        title_str = f'Trajectory Pipeline (eps={epsilon}'
+        if max_segment_length:
+            title_str += f', max_len={max_segment_length}'
+        title_str += ')'
+        ax.set_title(title_str)
         ax.legend(loc='best')
         
-        # 限制坐标轴比例防畸变
+        # 防止坐标系畸变
         max_range = np.array([all_points[:,0].max()-all_points[:,0].min(), 
                               all_points[:,1].max()-all_points[:,1].min(), 
                               all_points[:,2].max()-all_points[:,2].min()]).max() / 2.0

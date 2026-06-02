@@ -19,7 +19,7 @@ SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\checkpoints"
 
 # 2. 真实的训练数据路径
 # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
-DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data66"
+DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data65"
 # DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
 
 START_EPOCH = 1  # 如果从头训练填 1；如果调参直接从第 41 轮开始，填 41
@@ -95,7 +95,7 @@ def train_one_epoch_A(model, loader, criterion, optimizer, device, epoch_idx):
             points = points.permute(0, 2, 1) 
         
         xyz = points[:, :3, :].permute(0, 2, 1).contiguous()
-        points_input = points[:, :4, :]
+        points_input = points[:, :9, :]
 
 
         optimizer.zero_grad()
@@ -497,7 +497,7 @@ def validate_A(model, loader, criterion, device):
                 points = points.permute(0, 2, 1)
                 
             xyz = points[:, :3, :].permute(0, 2, 1).contiguous()
-            points_input = points[:, :4, :]
+            points_input = points[:, :9, :]
 
             # 💡 2. 传入 mask 给模型
             output = model(points_input, mask=mask)
@@ -921,8 +921,8 @@ def main():
     train_files = all_files[:split]
     val_files = all_files[split:]
 
-    train_loader = build_dataloader(train_files, batch_size=128, shuffle=True)
-    val_loader   = build_dataloader(val_files, batch_size=128, shuffle=False)
+    train_loader = build_dataloader(train_files, batch_size=32, shuffle=True)
+    val_loader   = build_dataloader(val_files, batch_size=32, shuffle=False)
 
     # --- 动态探针 ---
     sample_points, _, _, _ = next(iter(train_loader)) # 记得解包 4 个变量哦
@@ -937,7 +937,7 @@ def main():
         print("🚀 启动阶段一：训练管道探路模型 (Model A)")
         print("="*50)
         
-        model_A = get_model(num_classes=1, input_dim=4, dropout_p=0.0).to(device)
+        model_A = get_model(num_classes=1, input_dim=real_input_dim, dropout_p=0.0).to(device)
         
         # ... (这里保留你原本的 Model A 预训练加载逻辑和 loss 配置) ...
         criterion = get_loss(
