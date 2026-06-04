@@ -13,6 +13,7 @@ from scipy.stats import qmc
 import os
 import networkx as nx
 from scipy.spatial.distance import cdist
+import pickle   
 # 定义 Node 类，用于表示树中的每个节点
 class Node:
     def __init__(self, x, y, z):
@@ -2184,6 +2185,26 @@ def extract_waypoints_knn_astar(points_norm, scores, start_pt, goal_pt, k_neighb
         plt.show()
 
     return waypoints_seq
+
+# ================= 1. 保存数据 =================
+def save_test_case(filename, env_map, final_waypoints):
+    save_data = {
+        "env_map": env_map,
+        "final_waypoints": final_waypoints
+    }
+    with open(filename, "wb") as f:
+        pickle.dump(save_data, f)
+    print(f"数据已成功保存至 {filename}")
+
+# ================= 2. 读取数据 =================
+def load_test_case(filename):
+    with open(filename, "rb") as f:
+        loaded_data = pickle.load(f)
+    
+    env_map = loaded_data["env_map"]
+    final_waypoints = loaded_data["final_waypoints"]
+    return env_map, final_waypoints
+
 # 3. 主程序流水线
 # ==========================================
 if __name__ == '__main__':
@@ -2222,7 +2243,7 @@ if __name__ == '__main__':
     # ==========================================
     # ⭐ 阶段 1: 批量测试参数初始化
     # ==========================================
-    num_tests = 5
+    num_tests = 20
     
     # 时间统计
     sum_time_step2_feat = 0.0
@@ -2255,13 +2276,13 @@ if __name__ == '__main__':
         # 1. 随机生成环境与任务
         # ----------------------------------
         # env_map = env_generator(
-        #     rho=random.uniform(0.6, 0.85), 
+        #     rho=random.uniform(0.6, 0.8),   # 数据更丰富不容易出现过拟合
         #     map_dim=(1500, 1500, 240),
-        #     r_crash_range=(30, 50),
+        #     r_crash_range=(50, 80),
         #     r_risk_range=(3, 7),
-        #     zmax_range=(30, 240),
+        #     zmax_range=(10, 240),
         #     max_iter=5000,
-        #     seed=None
+        #     seed=None,
         # )
 
         env_map=env_generator_cluster(
@@ -2275,13 +2296,14 @@ if __name__ == '__main__':
             min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
             seed=None,
         )
+        
 
         Lx, Ly, Lz = env_map["map_dim"]
         obstacles = env_map["obstacles"]
         scale = max(Lx, Ly, Lz)
         center = 0.5 * np.array([Lx, Ly, Lz])
         
-        tasks = generate_valid_tasks(num_tasks=1, env_map=env_map, min_dist=1200, seed=None)
+        tasks = generate_valid_tasks(num_tasks=1, env_map=env_map, min_dist=1400, seed=None)
         S, G = np.array(tasks[0][0], dtype=np.float32), np.array(tasks[0][1], dtype=np.float32)
         S_norm = (S-center)/scale
         G_norm = (G-center)/scale
@@ -2464,7 +2486,7 @@ if __name__ == '__main__':
         else:
             print(f"  └─ 标准RRT*规划失败! 耗时: {trrt_end - trrt_start:.3f}s")
     
-        if i <= 15:
+        if i <= num_tests:
             plot_uav_comparison(
                 env_map=env_map, 
                 final_waypoints=final_waypoints, 
@@ -2507,5 +2529,7 @@ if __name__ == '__main__':
     print(f"  3. 向量化 RRT 规划平均总长度 : {avg_len_vec:.2f} 米 (规划成功率: {success_vector_rrt_count}/{num_tests})") # ⭐ 新增
     print(f"  4. 标准 RRT* 规划平均总长度  : {avg_len_rrt:.2f} 米 (规划成功率: {success_rrt_count}/{num_tests})")
     print("=" * 60)
+
+    save_test_case("test_case_cluster.pkl", env_map, final_waypoints)
 
     

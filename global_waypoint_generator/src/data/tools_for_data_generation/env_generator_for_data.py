@@ -286,6 +286,90 @@ def env_generator_cluster(
 
     return map_dict
 
+
+def env_generator_clutter(
+    rho=0.8,
+    map_dim=(1500, 1500, 300),   # (Lx, Ly, Lz)
+    r_crash_range=(30, 50),      # 碰撞半径
+    r_risk_range=(3, 7),         # 风险半径偏移量（基于 r_crash）
+    zmax_range=(30, 240),
+    max_iter=5000,               # 每次尝试摆放单个圆柱的最大失败次数
+    seed=None,
+):
+    """
+    生成随机杂乱圆柱障碍物地图（不允许圆柱重合）
+    r_risk = r_crash + 随机偏移量
+    """
+
+    if seed is not None:
+        np.random.seed(seed)
+
+    Lx, Ly, Lz = map_dim
+
+    obstacle_list = []
+    map_area = Lx * Ly
+
+    r_avg = (r_crash_range[0] + r_crash_range[1]) / 2
+    obs_area_avg = np.pi * r_avg ** 2
+    num_obs_est = int(rho * map_area / obs_area_avg)
+
+    for i in range(num_obs_est):
+        placed = False
+        
+        for _ in range(max_iter):
+            # ===== 半径 =====
+            r_crash = np.random.uniform(*r_crash_range)
+            r_risk  = r_crash + np.random.uniform(*r_risk_range)
+
+            # ===== 平面位置（保证风险圈不越界）=====
+            x = np.random.uniform(r_risk, Lx - r_risk)
+            y = np.random.uniform(r_risk, Ly - r_risk)
+
+            # ==========================================
+            # 核心修改：平面重叠检测
+            # ==========================================
+            is_overlapping = False
+            for obs in obstacle_list:
+                ox, oy, ozmin, ozmax, or_crash, or_risk = obs
+                # 计算两圆心的平面欧氏距离
+                dist = np.hypot(x - ox, y - oy) 
+                
+                # 如果距离小于两者物理碰撞半径之和，说明重合
+                # （如果你希望连风险圈都不允许重合，可以将 r_crash 替换为 r_risk）
+                if dist < (r_crash + or_crash): 
+                    is_overlapping = True
+                    break  # 发现重合，立刻跳出内层检测循环
+
+            # 如果重合了，直接 continue 进入下一次 _ (max_iter) 重新随机位置
+            if is_overlapping:
+                continue 
+            # ==========================================
+
+            # ===== 高度 (如果没有重合，则走到这里) =====
+            zmin = 0.0
+            zmax = np.random.uniform(zmax_range[0], min(zmax_range[1], Lz))
+
+            obstacle_list.append((x, y, zmin, zmax, r_crash, r_risk))
+            placed = True
+            break  # 当前障碍物摆放成功，跳出 max_iter 循环，去摆放下一个
+
+        # 如果尝试了 max_iter 次依然 placed == False，说明地图实在太挤了放不下了
+        if not placed:
+            print(f"Warning: 地图过于拥挤！已达最大尝试次数 ({max_iter})。")
+            print(f"实际生成障碍物: {len(obstacle_list)} / 预估: {num_obs_est}。可尝试降低 rho。")
+            break  # 停止生成剩余的障碍物
+
+    map_dict = {
+        "map_dim": map_dim,          # 核心：统一空间尺度
+        "rho": rho,
+        "area": map_area,
+        "obstacles": obstacle_list,
+        "num_obstacles": len(obstacle_list),
+        "seed": seed,
+    }
+
+    return map_dict
+
 # -------测试-------
 if __name__ == "__main__":
 
@@ -305,19 +389,30 @@ if __name__ == "__main__":
         r_crash_range=(40, 60),     # 为了给通道留出足够空间，半径相较于你原来设定的(80,125)稍微缩小了一些
         r_risk_range=(10, 20),
         zmax_range=(240, 240),
-        seed=42
+        seed=None
     )
 
-    env_map = env_generator_cluster(
-    map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
-    num_clusters=20,             # 建议 10~15 之间，保证有足够空间
-    chain_length_range=(1, 4),   # 每个簇的圆柱体数量
-    r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
-    r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
-    r_risk_range=(10, 20),       # 风险半径偏移量
-    zmax_range=(240, 240),
-    min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
-    seed=None,
-)
+#     env_map = env_generator_cluster(
+#     map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
+#     num_clusters=20,             # 建议 10~15 之间，保证有足够空间
+#     chain_length_range=(1, 4),   # 每个簇的圆柱体数量
+#     r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
+#     r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
+#     r_risk_range=(10, 20),       # 风险半径偏移量
+#     zmax_range=(240, 240),
+#     min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
+#     seed=None,
+# )
+    
+    # env_map = env_generator_clutter(
+    #         rho=0.7,   # 数据更丰富不容易出现过拟合
+    #         map_dim=(1500, 1500, 240),
+    #         r_crash_range=(30, 80),
+    #         r_risk_range=(3, 7),
+    #         zmax_range=(30, 240),
+    #         max_iter=5000,
+    #         seed=42
+    #     )
+
 
     plot_map(env_map)
