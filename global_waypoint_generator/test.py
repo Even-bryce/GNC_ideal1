@@ -4,7 +4,7 @@ import random
 import math
 import time
 from mpl_toolkits.mplot3d import Axes3D
-from src.data.tools_for_data_generation.env_generator_for_data import env_generator, env_generator_cluster
+from src.data.tools_for_data_generation.env_generator_for_data import env_generator, env_generator_cluster, env_generator_maze, env_generator_orthogonal_cluster_maze
 from src.models.pointnet_transfomer2.my_model import get_model
 from scipy.spatial import KDTree
 from sklearn.cluster import DBSCAN
@@ -2243,7 +2243,7 @@ if __name__ == '__main__':
     # ==========================================
     # ⭐ 阶段 1: 批量测试参数初始化
     # ==========================================
-    num_tests = 20
+    num_tests = 1
     
     # 时间统计
     sum_time_step2_feat = 0.0
@@ -2285,18 +2285,48 @@ if __name__ == '__main__':
         #     seed=None,
         # )
 
-        env_map=env_generator_cluster(
-            map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
-            num_clusters=20,             # 建议 10~15 之间，保证有足够空间
-            chain_length_range=(1, 4),   # 每个簇的圆柱体数量
-            r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
-            r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
-            r_risk_range=(10, 20),       # 风险半径偏移量
-            zmax_range=(240, 240),
-            min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
-            seed=None,
-        )
+        # env_map=env_generator_cluster(
+        #     map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
+        #     num_clusters=20,             # 建议 10~15 之间，保证有足够空间
+        #     chain_length_range=(1, 4),   # 每个簇的圆柱体数量
+        #     r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
+        #     r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
+        #     r_risk_range=(10, 20),       # 风险半径偏移量
+        #     zmax_range=(240, 240),
+        #     min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
+        #     seed=None,
+        # )
         
+        # env_map = env_generator_maze(
+        #     grid_size=(4, 4),           # 4x4的网格，网格越多通道越窄越复杂
+        #     map_dim=(1500, 1500, 240),
+        #     r_crash_range=(40, 60),     # 为了给通道留出足够空间，半径相较于你原来设定的(80,125)稍微缩小了一些
+        #     r_risk_range=(10, 20),
+        #     zmax_range=(240, 240),
+        #     seed=42
+        # )
+        FIXED_S = [0, 250, 120]
+        FIXED_G = [1500, 1250, 120]
+        my_custom_waypoints = [
+                (FIXED_S[0], FIXED_S[1]),  # 第 1 个点：起点 (0, 250)
+                (500, 750),                # 第 2 个点：左侧转折点
+                (1000, 750),               # 第 3 个点：右侧转折点
+                (FIXED_G[0], FIXED_G[1])   # 第 4 个点：终点 (1500, 1250)
+            ]
+        env_map = env_generator_orthogonal_cluster_maze(
+                map_dim=(1500, 1500, 240),
+                r_crash_base=50,             # 圆柱半径，统一为40
+                r_risk_offset=15,            # 风险圈外扩大小
+                zmax_range=(240, 240),
+                num_walls=50,                # 【替换原density】：想要生成的独立墙的总数，过多会导致地图过于拥挤，过少则不够复杂
+                chain_length_range=(3, 10),   # 墙的长度，比如连续3到7个圆柱
+                overlap_ratio=0.7,          # 让圆柱体紧密咬合
+                safe_waypoints=my_custom_waypoints, # 传入Z型骨架
+                r_safe_passage=50,          # 挖空的通道宽度
+                min_same_dir_dist=40,       # 【关键参数】：同方向墙壁（横对横，竖对竖）的最小间距
+                min_cross_dir_dist=-20,       # 【关键参数】：异方向墙壁（横对竖）的最小间距
+                seed=None
+            )
 
         Lx, Ly, Lz = env_map["map_dim"]
         obstacles = env_map["obstacles"]
@@ -2304,6 +2334,9 @@ if __name__ == '__main__':
         center = 0.5 * np.array([Lx, Ly, Lz])
         
         tasks = generate_valid_tasks(num_tasks=1, env_map=env_map, min_dist=1400, seed=None)
+        tasks = [
+            ([0, 250, 120], [1500, 1250, 120])
+        ]
         S, G = np.array(tasks[0][0], dtype=np.float32), np.array(tasks[0][1], dtype=np.float32)
         S_norm = (S-center)/scale
         G_norm = (G-center)/scale
@@ -2530,6 +2563,6 @@ if __name__ == '__main__':
     print(f"  4. 标准 RRT* 规划平均总长度  : {avg_len_rrt:.2f} 米 (规划成功率: {success_rrt_count}/{num_tests})")
     print("=" * 60)
 
-    save_test_case("test_case_cluster.pkl", env_map, final_waypoints)
+    save_test_case("test_case_maze.pkl", env_map, final_waypoints)
 
     

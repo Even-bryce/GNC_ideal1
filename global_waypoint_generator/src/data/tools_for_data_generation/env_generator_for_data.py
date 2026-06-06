@@ -1,7 +1,7 @@
 import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
-from res_show_for_data import plot_map
+from .res_show_for_data import plot_map
 import random
 
 def env_generator(
@@ -370,6 +370,165 @@ def env_generator_clutter(
 
     return map_dict
 
+import numpy as np
+import random
+
+# ==========================================
+# 辅助函数：计算点到【折线】的距离
+# ==========================================
+def is_point_near_polyline(p, waypoints, threshold):
+    """检查点 p 是否在由多段线 (waypoints) 组成的路径的阈值距离内"""
+    def point_near_segment(p, s1, s2, thresh):
+        if np.all(s1 == s2): return np.linalg.norm(p - s1) <= thresh
+        line_vec = s2 - s1
+        point_vec = p - s1
+        line_len_sq = np.sum(line_vec**2)
+        t = max(0, min(1, np.dot(point_vec, line_vec) / line_len_sq))
+        projection = s1 + t * line_vec
+        return np.linalg.norm(p - projection) <= thresh
+
+    for i in range(len(waypoints) - 1):
+        if point_near_segment(p, waypoints[i], waypoints[i+1], threshold):
+            return True
+    return False
+
+# ==========================================
+# 辅助函数：生成横平竖直的连续圆柱墙 (带方向互斥逻辑)
+# ==========================================
+def add_uniform_cylinder_wall_safe(
+    obstacle_list, existing_H, existing_V,  # 新增：传入已存在的横/纵坐标库
+    Lx, Ly, Lz, cx, cy, direction, length, 
+    zmax_range, r_crash, r_risk_offset, 
+    safe_waypoints, r_safe, overlap_ratio,
+    min_same_dist, min_cross_dist         # 新增：同向间距与异向间距
+):
+    """
+    生成一条连续、大小均匀的圆柱墙。带有同向排斥逻辑，防止墙体粘连。
+    返回 True 表示生成成功，False 表示被排斥放弃。
+    """
+    step_size = r_crash * 2 * overlap_ratio
+    
+    # 计算这面墙的起始和结束坐标
+    if direction == 'H':
+        dx, dy = (length - 1) * step_size, 0
+    else:
+        dx, dy = 0, (length - 1) * step_size
+        
+    x_start, y_start = cx - dx/2, cy - dy/2
+    r_risk = r_crash + r_risk_offset
+
+    # 1. 预先计算这堵墙所有圆柱的候选坐标
+    candidate_points = []
+    for i in range(length):
+        x = x_start + (i * step_size if direction == 'H' else 0)
+        y = y_start + (i * step_size if direction == 'V' else 0)
+        candidate_points.append(np.array([x, y]))
+
+    # 2. 合法性与排斥检查（只要有一个圆柱不合法，整堵墙都不要）
+    for p in candidate_points:
+        # a. 边界保护
+        if not (r_risk <= p[0] <= Lx - r_risk and r_risk <= p[1] <= Ly - r_risk):
+            return False
+
+        # b. 安全通道检查
+        if is_point_near_polyline(p, safe_waypoints, r_safe):
+            return False
+
+        # c. 【核心】同方向排斥检查 (保持较远距离)
+        target_same = existing_H if direction == 'H' else existing_V
+        if len(target_same) > 0:
+            arr_same = np.array(target_same)
+            dists = np.hypot(arr_same[:, 0] - p[0], arr_same[:, 1] - p[1])
+            if np.any(dists < (r_crash * 2 + min_same_dist)):
+                return False
+
+        # d. 【核心】异方向排斥检查 (允许交叉或靠近)
+        target_cross = existing_V if direction == 'H' else existing_H
+        if len(target_cross) > 0:
+            arr_cross = np.array(target_cross)
+            dists = np.hypot(arr_cross[:, 0] - p[0], arr_cross[:, 1] - p[1])
+            if np.any(dists < (r_crash * 2 + min_cross_dist)):
+                return False
+
+    # 3. 如果所有检查都通过，正式加入地图
+    curr_zmax = np.random.uniform(zmax_range[0], min(zmax_range[1], Lz))
+    for p in candidate_points:
+        obstacle_list.append((p[0], p[1], 0.0, curr_zmax, r_crash, r_risk))
+        # 记录到对应的坐标库中
+        if direction == 'H':
+            existing_H.append([p[0], p[1]])
+        else:
+            existing_V.append([p[0], p[1]])
+
+    return True
+
+# ==========================================
+# 主生成函数：带有方向区分互斥的直角簇迷宫
+# ==========================================
+def env_generator_orthogonal_cluster_maze(
+    map_dim=(1500, 1500, 240),
+    r_crash_base=40,             # 固定的圆柱体半径
+    r_risk_offset=15,            # 风险圈外扩大小
+    zmax_range=(120, 240),
+    num_walls=35,                # 【替换原density】：想要生成的独立墙的总数
+    chain_length_range=(3, 7),   # 每堵墙由几个圆柱组成
+    overlap_ratio=0.85,          # 重叠系数
+    safe_waypoints=None,         # 折线通道路径点
+    r_safe_passage=160,          # 通道宽度
+    min_same_dir_dist=120,       # 【关键参数】：同方向墙壁（横对横，竖对竖）的最小间距
+    min_cross_dir_dist=10,       # 【关键参数】：异方向墙壁（横对竖）的最小间距
+    seed=None,
+):
+    if seed is not None:
+        np.random.seed(seed)
+        random.seed(seed)
+
+    Lx, Ly, Lz = map_dim
+    obstacle_list = []
+    
+    # 用两个列表分别记录横向(H)和纵向(V)已存在的圆柱坐标
+    existing_H_centers = []
+    existing_V_centers = []
+    
+    # 处理折线通道
+    if safe_waypoints is None:
+        safe_waypoints = [(0, 250), (1500, 1250)]
+    waypoints_arr = [np.array(wp, dtype=np.float32) for wp in safe_waypoints]
+    
+    margin = r_crash_base * 2
+    max_attempts = 2000  # 最大尝试次数，防止死循环
+    walls_placed = 0
+
+    # 在地图内随机抛洒中心点，尝试生成墙体
+    for _ in range(max_attempts):
+        if walls_placed >= num_walls:
+            break  # 达到想要的墙壁数量就停止
+            
+        cx = np.random.uniform(margin, Lx - margin)
+        cy = np.random.uniform(margin, Ly - margin)
+        
+        # 随机决定长度和方向
+        length = random.randint(*chain_length_range)
+        direction = 'H' if random.random() < 0.5 else 'V'
+        
+        # 调用生成函数，如果生成成功（返回 True），则计数器 +1
+        success = add_uniform_cylinder_wall_safe(
+            obstacle_list, existing_H_centers, existing_V_centers,
+            Lx, Ly, Lz, cx, cy, direction, length, 
+            zmax_range, r_crash_base, r_risk_offset, 
+            waypoints_arr, r_safe_passage, overlap_ratio,
+            min_same_dir_dist, min_cross_dir_dist
+        )
+        
+        if success:
+            walls_placed += 1
+
+    return {
+        "map_dim": map_dim,
+        "obstacles": obstacle_list,
+        "num_obstacles": len(obstacle_list),
+        "seed": seed,
+    }
 # -------测试-------
 if __name__ == "__main__":
 
@@ -413,6 +572,28 @@ if __name__ == "__main__":
     #         max_iter=5000,
     #         seed=42
     #     )
+    FIXED_S = [0, 250, 120]
+    FIXED_G = [1500, 1250, 120]
+    my_custom_waypoints = [
+            (FIXED_S[0], FIXED_S[1]),  # 第 1 个点：起点 (0, 250)
+            (500, 750),                # 第 2 个点：左侧转折点
+            (1000, 750),               # 第 3 个点：右侧转折点
+            (FIXED_G[0], FIXED_G[1])   # 第 4 个点：终点 (1500, 1250)
+        ]
+    env_map = env_generator_orthogonal_cluster_maze(
+            map_dim=(1500, 1500, 240),
+            r_crash_base=50,             # 圆柱半径，统一为40
+            r_risk_offset=15,            # 风险圈外扩大小
+            zmax_range=(240, 240),
+            num_walls=50,                # 【替换原density】：想要生成的独立墙的总数，过多会导致地图过于拥挤，过少则不够复杂
+            chain_length_range=(3, 10),   # 墙的长度，比如连续3到7个圆柱
+            overlap_ratio=0.7,          # 让圆柱体紧密咬合
+            safe_waypoints=my_custom_waypoints, # 传入Z型骨架
+            r_safe_passage=80,          # 挖空的通道宽度
+            min_same_dir_dist=50,       # 【关键参数】：同方向墙壁（横对横，竖对竖）的最小间距
+            min_cross_dir_dist=-20,       # 【关键参数】：异方向墙壁（横对竖）的最小间距
+            seed=None
+        )
 
 
     plot_map(env_map)
