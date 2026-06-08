@@ -269,7 +269,6 @@ def extract_waypoints_knn_astar(points_norm, scores, start_pt, goal_pt, k_neighb
 
     return waypoints_seq
 
-
 # 💡 增加了一个 true_mid_wps 参数接收真实航路点
 def visualize_result(xyz, target, pred_prob, start_pt, goal_pt, gt_mid_wps, pred_mid_wps, true_mid_wps, threshold=0.5):
     """
@@ -454,7 +453,7 @@ def calculate_path_length_by_feature(start_pt, goal_pt, mid_wps, scale, center):
 
 
 @torch.no_grad()
-def evaluate_A(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
+def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     all_files = sorted(glob.glob(os.path.join(data_dir, "*.npz")))
@@ -498,14 +497,15 @@ def evaluate_A(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02
         # 💡 修改 1：解包时接收 mask
         for i, (points, targets, mask, gt_waypoints_list) in enumerate(test_loader):
             points = points.to(device)   
-            targets = targets[..., 0:1].to(device)
+            targets = targets.to(device) 
             mask = mask.to(device) # 💡 将 mask 放入 GPU
             
             points_trans = points.permute(0, 2, 1).contiguous() 
-            # points_trans = points_trans[:, :4, :]
+
+            points_input = points_trans[:, :9, :]
 
             # 💡 修改 2：把 mask 传给模型
-            output = model(points_trans, mask=mask)
+            output = model(points_input, mask=mask)
             logits = output[0] if isinstance(output, (tuple, list)) else output
             probs = torch.sigmoid(logits) 
 
@@ -698,248 +698,6 @@ def evaluate_A(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02
             print(f"   📈 预测相比绝对真值，平均长度偏差: {diff_ratio:+.2f}%")
         print("="*60 + "\n")
 
-def evaluate_B(model_B_path, model_A_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02, tube_thresh=0.4):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    all_files = sorted(glob.glob(os.path.join(data_dir, "*.npz")))
-    if len(all_files) == 0:
-        print(f"Error: 在该目录下找不到 .npz 数据 -> {data_dir}")
-        return
-
-    dataset = PathPointDataset(all_files)
-    sample_points, sample_labels, sample_waypoints = dataset[0]
-    real_input_dim = sample_points.shape[1]
-
-    # ==========================================
-    # 💡 实例化并加载两个模型
-    # ==========================================
-    print("加载 Model A (管道先验网络)...")
-    model_A = get_model(num_classes=1, input_dim=real_input_dim).to(device)
-    model_A.load_state_dict(torch.load(model_A_path, map_location=device))
-    model_A.eval()
-
-    print("加载 Model B (航路点精测网络)...")
-    model_B = get_model(num_classes=1, input_dim=real_input_dim, blocks=[2,4,2,2], stride=[1,4,2,2], share_planes=16).to(device) # 💡 输入维度 +1
-    model_B.load_state_dict(torch.load(model_B_path, map_location=device))
-    model_B.eval()
-
-    split = int(len(all_files) * 0.8)
-    val_files = all_files[split:]
-
-    dataset = PathPointDataset(val_files)
-    test_loader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
-
-    # 物理距离评估累加器
-    total_true_dist = 0.0
-    total_gt_dist = 0.0
-    total_pred_dist = 0.0
-    evaluated_samples = 0
-
-    # 分类概率评估累加器
-    val_max_probs, val_neg_max_probs, val_neg_fpr_list = [], [], []
-    val_se_mean_probs, val_mid_mean_probs, val_mid_fnr_list = [], [], []
-
-    print(f"🚀 开始阶段 B 批量评估，共计 {len(val_files)} 个样本，请稍候...")
-
-    with torch.no_grad():
-        for i, (points, targets, mask, gt_waypoints_list) in enumerate(test_loader):
-            points = points.to(device)
-            mask = mask.to(device)
-            
-            # 💡 取通道 1：高斯航路点真值
-            targets_wp = targets[..., 1:2].to(device)
-            
-            points_trans = points.permute(0, 2, 1).contiguous() # [B, 9, N]
-
-            # ==========================================
-            # 💡 级联推理：Model A 提供先验与掩码
-            # ==========================================
-            out_A = model_A(points_trans, mask=mask)
-            logits_A = out_A[0] if isinstance(out_A, (tuple, list)) else out_A
-            probs_A = torch.sigmoid(logits_A)
-
-            # 维度对齐防爆
-            if probs_A.dim() == 3:
-                if probs_A.shape[1] != 1: probs_A = probs_A.permute(0, 2, 1) # 转为 [B, 1, N]
-            elif probs_A.dim() == 2:
-                probs_A = probs_A.unsqueeze(1)
-
-            # 生成截流掩码
-            tube_mask = (probs_A > tube_thresh).squeeze(1) # [B, N]
-            combined_mask = mask & tube_mask               # 联合掩码
-
-            # 拼接 10 维特征
-            points_with_prior = torch.cat([points_trans, probs_A], dim=1) # [B, 10, N]
-            points_with_prior = points_trans
-
-            # ==========================================
-            # 💡 级联推理：Model B 专心寻峰
-            # ==========================================
-            out_B = model_B(points_with_prior, mask=combined_mask)
-            logits_B = out_B[0] if isinstance(out_B, (tuple, list)) else out_B
-            probs_B = torch.sigmoid(logits_B)
-
-            # 统一张量形状为 [B, N]
-            probs_B_sq = probs_B.view(1, -1) 
-            targets_wp_sq = targets_wp.view(1, -1)
-
-            # 💡 物理镇压：将管外或 padding 的点的打分强制清零！
-            # 防止管外的随机噪声被 NMS 提取为航路点
-            probs_B_sq[~combined_mask] = 0.0
-
-            # ==========================================
-            # 统计分类指标 (基于 combined_mask 过滤)
-            # ==========================================
-            if combined_mask.sum() > 0:
-                val_max_probs.append(probs_B_sq[combined_mask].max().item())
-            
-            neg_mask = (targets_wp_sq < 0.1) & combined_mask
-            if neg_mask.sum() > 0:
-                neg_probs = probs_B_sq[neg_mask]
-                val_neg_max_probs.append(neg_probs.max().item())
-                num_false_pos = (neg_probs > 0.5).float().sum()
-                fpr = num_false_pos / neg_probs.numel()
-                val_neg_fpr_list.append(fpr.item())
-
-            pos_mask = (targets_wp_sq > 0.8) & combined_mask
-            if points_trans.shape[1] >= 6:  
-                f_start = points_trans[:, 3, :]  
-                f_goal  = points_trans[:, 4, :]
-                is_start_end = (f_start > 0.95) | (f_goal > 0.95)
-                mask_SE = pos_mask & is_start_end       
-                mask_MID = pos_mask & (~is_start_end)   
-
-                if mask_SE.sum() > 0:
-                    val_se_mean_probs.append(probs_B_sq[mask_SE].mean().item())
-                if mask_MID.sum() > 0:
-                    mid_probs = probs_B_sq[mask_MID]
-                    val_mid_mean_probs.append(mid_probs.mean().item())
-                    num_false_neg = (mid_probs < 0.5).float().sum()
-                    fnr = num_false_neg / mid_probs.numel()
-                    val_mid_fnr_list.append(fnr.item())
-
-            # ==========================================
-            # 可视化与聚类数据提取 (仅使用全局有效点 mask)
-            # ==========================================
-            xyz_vis_raw = points[0, :, :3]      
-            target_vis_raw = targets_wp_sq[0]
-            prob_vis_raw = probs_B_sq[0]
-            mask_vis = mask[0] 
-
-            # 取出有效点 (因为之前 probs_B_sq[~combined_mask]=0，管外点虽然在这里，但分数都是 0)
-            xyz_vis = xyz_vis_raw[mask_vis]
-            target_vis = target_vis_raw[mask_vis]
-            prob_vis = prob_vis_raw[mask_vis]
-
-            start_pt = xyz_vis[0].cpu().numpy()
-            goal_pt = xyz_vis[1].cpu().numpy()
-
-            mid_xyz = xyz_vis[2:]
-            mid_target = target_vis[2:]
-            mid_prob = prob_vis[2:]
-
-            # ------------------------------------------
-            # 后续提取与距离计算逻辑保持一致
-            # ------------------------------------------
-            raw_wps_phys = gt_waypoints_list[0]
-            if isinstance(raw_wps_phys, torch.Tensor):
-                raw_wps_phys = raw_wps_phys.cpu().numpy()
-                
-            Lx, Ly, Lz = map_dim
-            center = 0.5 * np.array([Lx, Ly, Lz])
-            scale = max(Lx, Ly, Lz)
-            raw_wps_norm = (raw_wps_phys - center) / scale
-            
-            if len(raw_wps_norm) > 2:
-                true_mid_wps = raw_wps_norm[1:-1]
-            else:
-                true_mid_wps = np.empty((0, 3))
-
-            pred_mask_vis = mid_prob > 0.6
-            pred_xyz_filtered = mid_xyz[pred_mask_vis].cpu().numpy()
-            pred_scores_filtered = mid_prob[pred_mask_vis].cpu().numpy()
-            
-            raw_pred_mid_waypoints = extract_waypoints(
-                pred_xyz_filtered, pred_scores_filtered, 
-                map_dim=map_dim, eps=cluster_eps, peak_radius=peak_radius
-            )
-
-            pred_mid_waypoints = filter_zigzag_waypoints(
-                start_pt, goal_pt, raw_pred_mid_waypoints, 
-                min_dist=0.05,       
-                local_thresh=0.2,    
-                max_turn_angle=60.0  
-            )
-            
-            gt_mask_vis = mid_target > 0.8
-            gt_xyz_filtered = mid_xyz[gt_mask_vis].cpu().numpy()
-            gt_scores_filtered = mid_target[gt_mask_vis].cpu().numpy()
-            
-            gt_mid_waypoints = extract_waypoints(
-                gt_xyz_filtered, gt_scores_filtered, 
-                map_dim=map_dim, eps=cluster_eps, peak_radius=peak_radius
-            )
-
-            if 0 <= i <= 10:
-                visualize_result(
-                    xyz_vis, target_vis, prob_vis, 
-                    start_pt, goal_pt, gt_mid_waypoints, pred_mid_waypoints, true_mid_wps,
-                    threshold=0.5
-                )
-
-                cmd = input("Press Enter for next sample, or 'n' to stop: ")
-                if cmd.lower() == 'n':
-                    break
-
-            true_path_dist = calculate_path_length_by_feature(start_pt, goal_pt, true_mid_wps, scale, center)
-            gt_cluster_dist = calculate_path_length_by_feature(start_pt, goal_pt, gt_mid_waypoints, scale, center)
-            pred_cluster_dist = calculate_path_length_by_feature(start_pt, goal_pt, pred_mid_waypoints, scale, center)
-
-            total_true_dist += true_path_dist
-            total_gt_dist += gt_cluster_dist
-            total_pred_dist += pred_cluster_dist
-            evaluated_samples += 1
-
-            if (i + 1) % 10 == 0:
-                print(f"  已处理 {i + 1} / {len(val_files)}...")
-
-    # ==========================================
-    # 测试集平均结果输出
-    # ==========================================
-    if evaluated_samples > 0:
-        avg_true_dist = total_true_dist / evaluated_samples
-        avg_gt_dist = total_gt_dist / evaluated_samples
-        avg_pred_dist = total_pred_dist / evaluated_samples
-        
-        avg_neg_max = np.mean(val_neg_max_probs) if len(val_neg_max_probs) > 0 else 0.0
-        avg_fpr = np.mean(val_neg_fpr_list) if len(val_neg_fpr_list) > 0 else 0.0
-        avg_se_mean = np.mean(val_se_mean_probs) if len(val_se_mean_probs) > 0 else 0.0
-        avg_mid_mean = np.mean(val_mid_mean_probs) if len(val_mid_mean_probs) > 0 else 0.0
-        avg_mid_fnr = np.mean(val_mid_fnr_list) if len(val_mid_fnr_list) > 0 else 0.0
-        
-        print("\n" + "="*60)
-        print(f"🏁 阶段 B 验证集测试完成！共计评估 {evaluated_samples} 个样本")
-        print("="*60)
-        
-        print("📊 [预测概率与分类性能 (基于联合掩码)]")
-        print(f"  ➤ SE (起终点) 平均置信度 : {avg_se_mean:.3f}")
-        print(f"  ➤ Mid (中间点) 平均置信度: {avg_mid_mean:.3f}")
-        print(f"  ➤ NegMax (负样本最高概率): {avg_neg_max:.3f}")
-        print(f"  ➤ FPR (误检率 / 假阳性)  : {avg_fpr:.4f}  <-- 结合管道掩码后，此项应极低")
-        print(f"  ➤ FNR (漏检率 / 假阴性)  : {avg_mid_fnr:.4f}")
-        print("-" * 60)
-        
-        print("📏 [物理路径长度表现]")
-        print(f"  👑 绝对真值 (Raw WPs) 平均长度 : {avg_true_dist:.2f}")
-        print(f"  🎯 标签聚类 (GT)      平均长度 : {avg_gt_dist:.2f}")
-        print(f"  🤖 模型预测 (Pred)    平均长度 : {avg_pred_dist:.2f}")
-        
-        if avg_true_dist > 0:
-            diff_ratio = ((avg_pred_dist - avg_true_dist) / avg_true_dist) * 100
-            print("-" * 60)
-            print(f"  📈 预测相比绝对真值，平均长度偏差: {diff_ratio:+.2f}%")
-        print("="*60 + "\n")
-
 # def evaluate(model_path, data_dir, map_dim, cluster_eps=0.02, peak_radius=0.02):
 #     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -1053,11 +811,9 @@ def evaluate_B(model_B_path, model_A_path, data_dir, map_dim, cluster_eps=0.02, 
 if __name__ == "__main__":
     
     # DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data9"
-    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data52"
+    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data65"
     # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
-    # CKPT_PATH = r"C:\Users\Administrator\Desktop\experiments\checkpoints\best_model.pth"
-    A_CKPT_PATH = r"c:\Users\Administrator\Desktop\experiments\checkpoints\Stage_A\best_model.pth"
-    B_CKPT_PATH = r"c:\Users\Administrator\Desktop\experiments\checkpoints\Stage_B\best_model.pth"
+    CKPT_PATH = r"C:\Users\Administrator\Desktop\experiments\checkpoints\best_model.pth"
     # CKPT_PATH = r"C:\Users\Administrator\Desktop\experiments\best_model_for_trian_data5\best_model.pth"
 
 
@@ -1071,20 +827,10 @@ if __name__ == "__main__":
     CLUSTER_EPS = 0.15 
     PEAK_RADIUS = 0.15 
 
-    evaluate_A(
-        model_path=A_CKPT_PATH, 
+    evaluate(
+        model_path=CKPT_PATH, 
         data_dir=DATA_DIR, 
         map_dim=MAP_DIM,
         cluster_eps=CLUSTER_EPS,
         peak_radius=PEAK_RADIUS
     )
-
-    # evaluate_B(
-    #     model_B_path=B_CKPT_PATH,
-    #     model_A_path=A_CKPT_PATH,
-    #     data_dir=DATA_DIR, 
-    #     map_dim=MAP_DIM,
-    #     cluster_eps=CLUSTER_EPS,
-    #     peak_radius=PEAK_RADIUS,
-    #     tube_thresh=0.4
-    # )

@@ -2564,5 +2564,4 @@ if __name__ == '__main__':
     print("=" * 60)
 
     save_test_case("test_case_maze.pkl", env_map, final_waypoints)
-
     
