@@ -14,6 +14,7 @@ import os
 import networkx as nx
 from scipy.spatial.distance import cdist
 import pickle   
+import glob
 # 定义 Node 类，用于表示树中的每个节点
 class Node:
     def __init__(self, x, y, z):
@@ -2205,6 +2206,16 @@ def load_test_case(filename):
     final_waypoints = loaded_data["final_waypoints"]
     return env_map, final_waypoints
 
+
+def load_test_map(filename):
+    with open(filename, "rb") as f:
+        loaded_data = pickle.load(f)
+    
+    env_map = loaded_data["env_map"]
+    start = loaded_data["start"]
+    goal = loaded_data["goal"]
+    return env_map, start, goal
+
 # 3. 主程序流水线
 # ==========================================
 if __name__ == '__main__':
@@ -2229,7 +2240,7 @@ if __name__ == '__main__':
     model = get_model(num_classes=1, input_dim=9, dropout_p=0.0).to(device) 
     # model_path = r"C:\Users\Administrator\Desktop\experiments\best_model_for_trian_data5\best_model.pth"
     # model_path = r"C:\Users\Administrator\Desktop\experiments\best_model_for_train_data6_2\best_model.pth"
-    model_path = r"C:\Users\Administrator\Desktop\experiments\checkpoints\Stage_A\best_model.pth"
+    model_path = r"C:\Users\Administrator\Desktop\experiments\checkpoints\best_model.pth"
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     
@@ -2243,7 +2254,20 @@ if __name__ == '__main__':
     # ==========================================
     # ⭐ 阶段 1: 批量测试参数初始化
     # ==========================================
-    num_tests = 1
+    # num_tests = 1
+
+    # 数据集路径 (请确保与你保存的路径一致)
+    DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data67"
+    
+    # 获取所有的 pkl 文件并排序，确保每次切分的一致性
+    all_pkl_files = sorted(glob.glob(os.path.join(DATA_DIR, "*.pkl")))
+    if not all_pkl_files:
+        raise FileNotFoundError(f"在 {DATA_DIR} 中没有找到任何 .pkl 文件！")
+
+    # 划分验证集 (后 20%)
+    split_idx = int(len(all_pkl_files) * 0.98)
+    val_files = all_pkl_files[split_idx:]
+    num_tests = len(val_files)
     
     # 时间统计
     sum_time_step2_feat = 0.0
@@ -2269,8 +2293,8 @@ if __name__ == '__main__':
 
     print(f"================ 开始执行 {num_tests} 组批量测试 ================")
 
-    for i in range(num_tests):
-        print(f"\n>>> 正在运行测试 [{i+1}/{num_tests}] ...", end=" ", flush=True)
+    # for i in range(num_tests):
+    #     print(f"\n>>> 正在运行测试 [{i+1}/{num_tests}] ...", end=" ", flush=True)
         
         # ----------------------------------
         # 1. 随机生成环境与任务
@@ -2303,41 +2327,54 @@ if __name__ == '__main__':
         #     r_crash_range=(40, 60),     # 为了给通道留出足够空间，半径相较于你原来设定的(80,125)稍微缩小了一些
         #     r_risk_range=(10, 20),
         #     zmax_range=(240, 240),
-        #     seed=42
+        #     seed=1
         # )
-        FIXED_S = [0, 250, 120]
-        FIXED_G = [1500, 1250, 120]
-        my_custom_waypoints = [
-                (FIXED_S[0], FIXED_S[1]),  # 第 1 个点：起点 (0, 250)
-                (500, 750),                # 第 2 个点：左侧转折点
-                (1000, 750),               # 第 3 个点：右侧转折点
-                (FIXED_G[0], FIXED_G[1])   # 第 4 个点：终点 (1500, 1250)
-            ]
-        env_map = env_generator_orthogonal_cluster_maze(
-                map_dim=(1500, 1500, 240),
-                r_crash_base=50,             # 圆柱半径，统一为40
-                r_risk_offset=15,            # 风险圈外扩大小
-                zmax_range=(240, 240),
-                num_walls=50,                # 【替换原density】：想要生成的独立墙的总数，过多会导致地图过于拥挤，过少则不够复杂
-                chain_length_range=(3, 10),   # 墙的长度，比如连续3到7个圆柱
-                overlap_ratio=0.7,          # 让圆柱体紧密咬合
-                safe_waypoints=my_custom_waypoints, # 传入Z型骨架
-                r_safe_passage=50,          # 挖空的通道宽度
-                min_same_dir_dist=40,       # 【关键参数】：同方向墙壁（横对横，竖对竖）的最小间距
-                min_cross_dir_dist=-20,       # 【关键参数】：异方向墙壁（横对竖）的最小间距
-                seed=None
-            )
+
+        # FIXED_S = [0, 250, 120]
+        # FIXED_G = [1500, 1250, 120]
+        # my_custom_waypoints = [
+        #         (FIXED_S[0], FIXED_S[1]),  # 第 1 个点：起点 (0, 250)
+        #         (500, 750),                # 第 2 个点：左侧转折点
+        #         (1000, 750),               # 第 3 个点：右侧转折点
+        #         (FIXED_G[0], FIXED_G[1])   # 第 4 个点：终点 (1500, 1250)
+        #     ]
+        # env_map = env_generator_orthogonal_cluster_maze(
+        #         map_dim=(1500, 1500, 240),
+        #         r_crash_base=50,             # 圆柱半径，统一为40
+        #         r_risk_offset=15,            # 风险圈外扩大小
+        #         zmax_range=(240, 240),
+        #         num_walls=50,                # 【替换原density】：想要生成的独立墙的总数，过多会导致地图过于拥挤，过少则不够复杂
+        #         chain_length_range=(3, 10),   # 墙的长度，比如连续3到7个圆柱
+        #         overlap_ratio=0.7,          # 让圆柱体紧密咬合
+        #         safe_waypoints=my_custom_waypoints, # 传入Z型骨架
+        #         r_safe_passage=50,          # 挖空的通道宽度
+        #         min_same_dir_dist=40,       # 【关键参数】：同方向墙壁（横对横，竖对竖）的最小间距
+        #         min_cross_dir_dist=-20,       # 【关键参数】：异方向墙壁（横对竖）的最小间距
+        #         seed=None
+        #     )
+    for i, pkl_file in enumerate(val_files):
+        file_name = os.path.basename(pkl_file)
+        print(f"\n>>> 正在运行测试 [{i+1}/{num_tests}] (文件: {file_name}) ...", end=" ", flush=True)
+
+        # ----------------------------------
+        # 1. 从 pkl 文件加载环境与任务
+        # ----------------------------------
+        env_map, start, goal = load_test_map(pkl_file)
 
         Lx, Ly, Lz = env_map["map_dim"]
         obstacles = env_map["obstacles"]
         scale = max(Lx, Ly, Lz)
         center = 0.5 * np.array([Lx, Ly, Lz])
         
-        tasks = generate_valid_tasks(num_tasks=1, env_map=env_map, min_dist=1400, seed=None)
-        tasks = [
-            ([0, 250, 120], [1500, 1250, 120])
-        ]
-        S, G = np.array(tasks[0][0], dtype=np.float32), np.array(tasks[0][1], dtype=np.float32)
+        # 直接使用读取出来的起终点
+        S = np.array(start, dtype=np.float32)
+        G = np.array(goal, dtype=np.float32)
+        
+        # tasks = generate_valid_tasks(num_tasks=1, env_map=env_map, min_dist=1400, seed=None)
+        # tasks = [
+        #     ([0, 250, 120], [1500, 1250, 120])
+        # ]
+        # S, G = np.array(tasks[0][0], dtype=np.float32), np.array(tasks[0][1], dtype=np.float32)
         S_norm = (S-center)/scale
         G_norm = (G-center)/scale
 
@@ -2417,6 +2454,13 @@ if __name__ == '__main__':
                 epsilon=0.08     # 可以根据你空间的实际比例微调这个抽稀阈值
             )
         final_waypoints = final_waypoints_norm * scale + center
+        #   final_waypoints = np.array([
+        #     [0, 250, 120],
+        #     [500, 750, 120],
+        #     [200, 1250, 120],
+        #     [1125, 1000, 120],  
+        #     [1500, 1250, 120]
+        # ], dtype=float)
 
 
         t4_end = time.time()
@@ -2500,7 +2544,7 @@ if __name__ == '__main__':
             R_crash=1.2, R_risk=1.7, 
             obstacle_list=obstacles, 
             rand_area=[[0, 0, 0], [Lx, Ly, Lz]],
-            expand_dis=15, max_iter=10000, search_radius=75,
+            expand_dis=5, max_iter=10000, search_radius=75,
             search_until_max_iter=False
         )
         
@@ -2563,5 +2607,5 @@ if __name__ == '__main__':
     print(f"  4. 标准 RRT* 规划平均总长度  : {avg_len_rrt:.2f} 米 (规划成功率: {success_rrt_count}/{num_tests})")
     print("=" * 60)
 
-    save_test_case("test_case_maze.pkl", env_map, final_waypoints)
+    # save_test_case("test_case_maze.pkl", env_map, final_waypoints)
     

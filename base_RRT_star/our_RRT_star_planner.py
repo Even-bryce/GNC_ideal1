@@ -105,6 +105,7 @@ class RRTStar:
 
                 steer_node = self.steer(nearest_node, rnd)
                 new_node = self.apf_steer(steer_node, tree2[0])
+                new_node.parent = nearest_node
 
                 if not self.check_collision(new_node) and not self.check_edge_collision(nearest_node, new_node):
                     
@@ -199,6 +200,7 @@ class RRTStar:
                 # 3. 扩展 (Steer)
                 steer_node = self.steer(nearest_node, rnd)
                 new_node = self.apf_steer(steer_node, self.goal) # 这里目标可以是 self.goal
+                new_node.parent = nearest_node
 
                 # 4. 碰撞检测
                 if not self.check_collision(new_node) and not self.check_edge_collision(nearest_node, new_node):

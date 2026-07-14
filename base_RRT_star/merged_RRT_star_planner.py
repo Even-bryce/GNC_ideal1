@@ -85,6 +85,8 @@ class RRTStar:
             # 计算扩展方向并生成新节点，steer内部会自动计算新节点的成本
             steer_node = self.steer(nearest_node, Node(rnd[0], rnd[1], rnd[2]))
             new_node = self.apf_steer(steer_node, self.goal)
+            # 重建steer和apf_steer中的父子关系，重要！！！！
+            new_node.parent = nearest_node
     
             # 检查新节点是否与障碍物碰撞
             if (not self.check_collision(new_node) and 
@@ -470,8 +472,8 @@ class RRTStar:
 
         safe_goal_inds = []
         for goal_ind in goal_inds:
-            t_node = self.steer(self.node_list[goal_ind], self.goal)
-            if not self.check_collision(t_node) and not self.check_edge_collision(t_node, self.goal):
+            # t_node = self.steer(self.node_list[goal_ind], self.goal)
+            if not self.check_edge_collision(self.node_list[goal_ind], self.goal):
                 safe_goal_inds.append(goal_ind)
 
         if not safe_goal_inds:
@@ -685,7 +687,7 @@ def generate_valid_tasks(num_tasks, env_map, seed=None):
            check_point_validity(gx, gy, gz, obs_list):
             
             # 可选：确保起点终点不要太近 (例如 > 200m)
-            if math.sqrt((sx-gx)**2 + (sy-gy)**2 + (sz-gz)**2) > 200:
+            if math.sqrt((sx-gx)**2 + (sy-gy)**2 + (sz-gz)**2) > 2000:
                 tasks.append(([sx, sy, sz], [gx, gy, gz]))
                 count += 1
                 # print(f"生成的第 {count} 个任务: Start -> Goal")

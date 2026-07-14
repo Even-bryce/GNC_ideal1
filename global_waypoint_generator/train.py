@@ -18,7 +18,7 @@ SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\checkpoints"
 
 # 2. 真实的训练数据路径
 # DATA_DIR = r"C:\Users\Administrator\Nutstore\1\科研\科研具体idea实现进程\代码\idea1_code\global_waypoint_generator\src\data\data_for_train\train_data4"
-DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data65"
+DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data70"
 # DATA_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data5"
 
 START_EPOCH = 1  # 如果从头训练填 1；如果调参直接从第 41 轮开始，填 41
@@ -26,7 +26,7 @@ PRETRAINED_CKPT = r"C:\Users\Administrator\Desktop\experiments\checkpoints\ckpt_
 
 GAMMA = 2
 ALPHA = 0.6
-TOTAL_EPOCHS = 50        
+TOTAL_EPOCHS = 40        
 # ---------------------      
 # ---------------------
 
@@ -312,8 +312,8 @@ def main():
     train_files = all_files[:split]
     val_files = all_files[split:]
 
-    train_loader = build_dataloader(train_files, batch_size=32, shuffle=True)
-    val_loader   = build_dataloader(val_files, batch_size=32, shuffle=False)
+    train_loader = build_dataloader(train_files, batch_size=128, shuffle=True)
+    val_loader   = build_dataloader(val_files, batch_size=128, shuffle=False)
 
     # --- 【最简单的动态探针】 ---
     sample_points, _, _, curr_gt_waypoints = next(iter(train_loader))

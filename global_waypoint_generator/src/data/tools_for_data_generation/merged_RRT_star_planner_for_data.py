@@ -9,6 +9,7 @@ from env_generator_for_data import env_generator, env_generator_cluster, env_gen
 from res_show_for_data import plot_tree_and_path, plot_tree_and_path_and_waypoints
 from scipy.spatial import KDTree
 from sklearn.cluster import DBSCAN
+import pickle
 
 # 定义 Node 类，用于表示树中的每个节点
 class Node:
@@ -87,6 +88,7 @@ class RRTStar:
             # 计算扩展方向并生成新节点，steer内部会自动计算新节点的成本
             steer_node = self.steer(nearest_node, Node(rnd[0], rnd[1], rnd[2]))
             new_node = self.apf_steer(steer_node, self.goal)
+            new_node.parent = nearest_node
     
             # 检查新节点是否与障碍物碰撞
             if (not self.check_collision(new_node) and 
@@ -486,8 +488,8 @@ class RRTStar:
 
         safe_goal_inds = []
         for goal_ind in goal_inds:
-            t_node = self.steer(self.node_list[goal_ind], self.goal)
-            if not self.check_collision(t_node) and not self.check_edge_collision(t_node, self.goal):
+            # t_node = self.steer(self.node_list[goal_ind], self.goal)
+            if not self.check_edge_collision(self.node_list[goal_ind], self.goal):
                 safe_goal_inds.append(goal_ind)
 
         if not safe_goal_inds:
@@ -1671,18 +1673,26 @@ def is_path_meaningful(waypoints, min_angle_deg=15.0):
         
     return True
 
-
+def save_test_case(filename, env_map, start, goal):
+    """同步保存地图、起点和终点到 pkl 文件"""
+    save_data = {
+        "env_map": env_map,
+        "start": start,
+        "goal": goal
+    }
+    with open(filename, "wb") as f:
+        pickle.dump(save_data, f)
 
 # 假设所有必要的函数 (env_generator, generate_valid_tasks, RRTStar, find_straight_waypoint, save_sample, plot_...) 都已经导入定义好了
 
 if __name__ == '__main__':
     # ================= 配置区域 =================
-    NUM_MAPS = 1000          # 地图数量
-    TASKS_PER_MAP = 1        # 需要成功保存的有效任务数
-    BASE_SEED = 39           # 基础随机种子
+    NUM_MAPS = 50          # 地图数量
+    TASKS_PER_MAP = 20    # 需要成功保存的有效任务数
+    BASE_SEED = 39         # 基础随机种子
     
     # 保存路径
-    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data20"
+    SAVE_DIR = r"C:\Users\Administrator\Desktop\experiments\train_data70"
     
     # RRT* 参数
     R_AGENT_CRASH = 1.2
@@ -1693,9 +1703,6 @@ if __name__ == '__main__':
     
     # 质量控制参数
     MIN_TURN_ANGLE = 0  # 判定有效拐弯的最小角度阈值 (度)，小于这个视作平直路线
-    
-    # ===== 新增：地图丢弃控制参数 =====
-    MAX_MAP_ATTEMPTS = 10 # 单张地图最大尝试次数，超过则丢弃该地图
     # ===========================================
 
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -1707,14 +1714,38 @@ if __name__ == '__main__':
         
         print(f"\n[{map_id+1}/{NUM_MAPS}] 正在生成第 {map_id} 号地图 (Seed={current_seed})...")
         
-        env_map = env_generator_maze(
-            grid_size=(4, 4),           # 4x4的网格，网格越多通道越窄越复杂
-            map_dim=(1500, 1500, 240),
-            r_crash_range=(40, 60),     # 为了给通道留出足够空间，半径相较于你原来设定的(80,125)稍微缩小了一些
-            r_risk_range=(10, 20),
+        # 1. 生成地图
+        env_map=env_generator_cluster(
+            map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
+            num_clusters=20,             # 建议 10~15 之间，保证有足够空间
+            chain_length_range=(1, 4),   # 每个簇的圆柱体数量
+            r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
+            r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
+            r_risk_range=(10, 20),       # 风险半径偏移量
             zmax_range=(240, 240),
-            seed=BASE_SEED
+            min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
+            seed=current_seed,
+            # seed=BASE_SEED,
         )
+
+        # env_map = env_generator(
+        #     rho=random.uniform(0.6, 0.8),   # 数据更丰富不容易出现过拟合
+        #     map_dim=(1500, 1500, 240),
+        #     r_crash_range=(50, 80),
+        #     r_risk_range=(3, 7),
+        #     zmax_range=(10, 240),
+        #     max_iter=5000,
+        #     seed=current_seed
+        # )
+
+    #     env_map = env_generator_maze(
+    #     grid_size=(4, 4),           # 4x4的网格，网格越多通道越窄越复杂
+    #     map_dim=(1500, 1500, 240),
+    #     r_crash_range=(40, 60),     # 为了给通道留出足够空间，半径相较于你原来设定的(80,125)稍微缩小了一些
+    #     r_risk_range=(10, 20),
+    #     zmax_range=(240, 240),
+    #     seed=None
+    # )
 
         obstacle_list = env_map["obstacles"]
         print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。开始执行 RRT* 与质量筛选...")
@@ -1729,18 +1760,12 @@ if __name__ == '__main__':
         while saved_tasks < TASKS_PER_MAP:
             attempts += 1
             
-            # ===== 新增：失败次数过多，丢弃地图逻辑 =====
-            if attempts > MAX_MAP_ATTEMPTS:
-                print(f"\n⚠️ 警告: 第 {map_id} 号地图连续失败达 {MAX_MAP_ATTEMPTS} 次，认定为无解/低质量地图，直接丢弃！")
-                break # 直接跳出 while 循环，进入外层 for 循环生成下一个 map_id
-            
             # 动态生成 1 个任务。利用 attempts 作为增量改变 seed，确保每次生成不同的点对
             task = generate_valid_tasks(1, env_map, min_dist=1200, seed=current_seed + attempts)
             start, goal = task[0]
 
-            # 强制覆盖起终点（注意：如果起终点是写死的，而地图恰好在这两个点生成了死胡同，就会导致这张图必定无解）
-            start = [0, 250, 120]
-            goal = [1500, 1250, 120]
+            # start = [0, 250, 120]
+            # goal = [1500, 1250, 120]
         
             # 初始化 RRT*
             planner = RRTStar(
@@ -1773,7 +1798,7 @@ if __name__ == '__main__':
                 continue
                 
             if not is_path_meaningful(straight_waypoints, min_angle_deg=MIN_TURN_ANGLE):
-                print(f"T{saved_tasks:<8} | A{attempts:<8} | {'Filtered (Str)':<15} | {elapsed:<10.4f} | {'N/A':<10}")
+                print(f"T{saved_tasks:<8} | A{attempts:<8} | {'Filtered (Straight)':<15} | {elapsed:<10.4f} | {'N/A':<10}")
                 continue
             
             # ==========================================
@@ -1796,6 +1821,16 @@ if __name__ == '__main__':
                 sigma2=0.225,
                 eps=1e-8,
                 visualize=True if saved_tasks < 0 else False  # 仅可视化前10个高质量任务
+            )
+
+            pkl_file_name = f"map{map_id}_task{saved_tasks}.pkl"
+            pkl_full_save_path = os.path.join(SAVE_DIR, pkl_file_name)
+            
+            save_test_case(
+                filename=pkl_full_save_path, 
+                env_map=env_map, 
+                start=start, 
+                goal=goal
             )
             
             if saved_tasks < 0: 

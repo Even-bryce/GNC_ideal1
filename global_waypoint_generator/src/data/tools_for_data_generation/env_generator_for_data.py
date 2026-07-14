@@ -1,7 +1,7 @@
 import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
-from .res_show_for_data import plot_map
+from res_show_for_data import plot_map
 import random
 
 def env_generator(
@@ -470,13 +470,13 @@ def env_generator_orthogonal_cluster_maze(
     r_crash_base=40,             # 固定的圆柱体半径
     r_risk_offset=15,            # 风险圈外扩大小
     zmax_range=(120, 240),
-    num_walls=35,                # 【替换原density】：想要生成的独立墙的总数
+    density=0.15,                # 【新增】：墙体密度，推荐 0.1~0.4 之间调节地图难度
     chain_length_range=(3, 7),   # 每堵墙由几个圆柱组成
     overlap_ratio=0.85,          # 重叠系数
-    safe_waypoints=None,         # 折线通道路径点
+    safe_waypoints=None,         # 【修改】：如果为 None，则完全随机，不留保护通道
     r_safe_passage=160,          # 通道宽度
-    min_same_dir_dist=120,       # 【关键参数】：同方向墙壁（横对横，竖对竖）的最小间距
-    min_cross_dir_dist=10,       # 【关键参数】：异方向墙壁（横对竖）的最小间距
+    min_same_dir_dist=120,       # 同方向墙壁的最小间距
+    min_cross_dir_dist=10,       # 异方向墙壁的最小间距
     seed=None,
 ):
     if seed is not None:
@@ -486,32 +486,42 @@ def env_generator_orthogonal_cluster_maze(
     Lx, Ly, Lz = map_dim
     obstacle_list = []
     
-    # 用两个列表分别记录横向(H)和纵向(V)已存在的圆柱坐标
     existing_H_centers = []
     existing_V_centers = []
     
-    # 处理折线通道
+    # ==========================================
+    # 1. 处理折线通道：为 None 则传入空列表，表示完全随机
+    # ==========================================
     if safe_waypoints is None:
-        safe_waypoints = [(0, 250), (1500, 1250)]
-    waypoints_arr = [np.array(wp, dtype=np.float32) for wp in safe_waypoints]
+        waypoints_arr = []
+    else:
+        waypoints_arr = [np.array(wp, dtype=np.float32) for wp in safe_waypoints]
+    
+    # ==========================================
+    # 2. 根据密度 (density) 动态计算需要生成的墙体数量
+    # ==========================================
+    # 基准容量算法：将地图按 100x100 的网格划分。
+    # 对于 1500x1500 的地图，base_capacity = 225
+    # 当 density = 0.2 时，大约生成 45 堵墙。这样换不同尺寸地图时难度会保持一致。
+    base_capacity = (Lx / 100.0) * (Ly / 100.0)
+    target_walls = int(density * base_capacity)
     
     margin = r_crash_base * 2
-    max_attempts = 2000  # 最大尝试次数，防止死循环
+    
+    # 动态调整最大尝试次数：密度越大，后期越难放置，需要更多尝试次数防止死循环
+    max_attempts = max(2000, target_walls * 30) 
     walls_placed = 0
 
-    # 在地图内随机抛洒中心点，尝试生成墙体
     for _ in range(max_attempts):
-        if walls_placed >= num_walls:
-            break  # 达到想要的墙壁数量就停止
+        if walls_placed >= target_walls:
+            break  # 达到目标墙数就停止
             
         cx = np.random.uniform(margin, Lx - margin)
         cy = np.random.uniform(margin, Ly - margin)
         
-        # 随机决定长度和方向
         length = random.randint(*chain_length_range)
         direction = 'H' if random.random() < 0.5 else 'V'
         
-        # 调用生成函数，如果生成成功（返回 True），则计数器 +1
         success = add_uniform_cylinder_wall_safe(
             obstacle_list, existing_H_centers, existing_V_centers,
             Lx, Ly, Lz, cx, cy, direction, length, 
@@ -528,6 +538,9 @@ def env_generator_orthogonal_cluster_maze(
         "obstacles": obstacle_list,
         "num_obstacles": len(obstacle_list),
         "seed": seed,
+        "density_used": density,          # 记录实际使用的密度
+        "target_walls": target_walls,     # 记录目标生成的墙体数
+        "walls_generated": walls_placed   # 记录实际成功生成的墙体数
     }
 # -------测试-------
 if __name__ == "__main__":
@@ -548,7 +561,7 @@ if __name__ == "__main__":
         r_crash_range=(40, 60),     # 为了给通道留出足够空间，半径相较于你原来设定的(80,125)稍微缩小了一些
         r_risk_range=(10, 20),
         zmax_range=(240, 240),
-        seed=None
+        seed=1
     )
 
 #     env_map = env_generator_cluster(
@@ -572,25 +585,25 @@ if __name__ == "__main__":
     #         max_iter=5000,
     #         seed=42
     #     )
-    FIXED_S = [0, 250, 120]
-    FIXED_G = [1500, 1250, 120]
-    my_custom_waypoints = [
-            (FIXED_S[0], FIXED_S[1]),  # 第 1 个点：起点 (0, 250)
-            (500, 750),                # 第 2 个点：左侧转折点
-            (1000, 750),               # 第 3 个点：右侧转折点
-            (FIXED_G[0], FIXED_G[1])   # 第 4 个点：终点 (1500, 1250)
-        ]
+    # FIXED_S = [0, 250, 120]
+    # FIXED_G = [1500, 1250, 120]
+    # my_custom_waypoints = [
+    #         (FIXED_S[0], FIXED_S[1]),  # 第 1 个点：起点 (0, 250)
+    #         (500, 750),                # 第 2 个点：左侧转折点
+    #         (1000, 750),               # 第 3 个点：右侧转折点
+    #         (FIXED_G[0], FIXED_G[1])   # 第 4 个点：终点 (1500, 1250)
+    #     ]
     env_map = env_generator_orthogonal_cluster_maze(
             map_dim=(1500, 1500, 240),
-            r_crash_base=50,             # 圆柱半径，统一为40
-            r_risk_offset=15,            # 风险圈外扩大小
+            r_crash_base=40,             # 圆柱半径，统一为40
+            r_risk_offset=10,            # 风险圈外扩大小
             zmax_range=(240, 240),
-            num_walls=50,                # 【替换原density】：想要生成的独立墙的总数，过多会导致地图过于拥挤，过少则不够复杂
+            density=0.12,                # 墙体密度，推荐 0.1~0.4 之间调节地图难度
             chain_length_range=(3, 10),   # 墙的长度，比如连续3到7个圆柱
             overlap_ratio=0.7,          # 让圆柱体紧密咬合
-            safe_waypoints=my_custom_waypoints, # 传入Z型骨架
+            safe_waypoints=None, # 传入Z型骨架
             r_safe_passage=80,          # 挖空的通道宽度
-            min_same_dir_dist=50,       # 【关键参数】：同方向墙壁（横对横，竖对竖）的最小间距
+            min_same_dir_dist=60,       # 【关键参数】：同方向墙壁（横对横，竖对竖）的最小间距
             min_cross_dir_dist=-20,       # 【关键参数】：异方向墙壁（横对竖）的最小间距
             seed=None
         )
