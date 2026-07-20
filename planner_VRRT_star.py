@@ -4,7 +4,7 @@ import random
 import math
 import time
 from mpl_toolkits.mplot3d import Axes3D
-from env_generator_for_data import env_generator
+from env_generator_for_data import env_generator, env_generator_maze, env_generator_cluster
 from res_show import plot_map_and_waypoint, plot_tree_and_path
 
 # 定义 Node 类，用于表示树中的每个节点
@@ -65,9 +65,9 @@ class VRRT_star:
             
         first_path_found = np.full(num_trees, False, dtype=bool)
         first_path = np.full(num_trees, None, dtype=object)
-        iteration_find_path = np.zeros(num_trees, dtype=int)
+        iteration_list = np.zeros(num_trees, dtype=int)
         time_first_list = [None] * num_trees
-        path_length_list = [None] * num_trees
+        path_length_first_list = [None] * num_trees
         
         best_paths = np.full(num_trees, None, dtype=object)
         best_costs = [np.inf] * num_trees
@@ -109,12 +109,12 @@ class VRRT_star:
                         time_first_list[j] = elapsed
                         # 生成路径
                         first_path[j] = self.generate_final_path_from_node(goal_nodes_list[j])
-                        path_length_list[j] = calculate_path_length(first_path[j])
+                        path_length_first_list[j] = calculate_path_length(first_path[j])
                         
                         # 首次找到路径的迭代轮数
-                        iteration_find_path[j] = i
+                        iteration_list[j] = i
                         
-                        best_costs[j] = path_length_list[j]
+                        best_costs[j] = path_length_first_list[j]
                         best_paths[j] = first_path[j]
                         
                     if self.search_until_max_iter and first_path_found[j]:
@@ -124,15 +124,17 @@ class VRRT_star:
                             best_costs[j] = current_cost
                             best_paths[j] = self.generate_final_path_from_node(goal_nodes_list[j])
                             
-            if not self.search_until_max_iter and all(first_path_found):
+            if all(first_path_found):
                 # 合并所有航路段
-                combined_path = []
+                first_combined_path = []
                 for seg in first_path:
-                    if combined_path and combined_path[-1] == seg[0]:
-                        combined_path.extend(seg[1:])
+                    if first_combined_path and first_combined_path[-1] == seg[0]:
+                        first_combined_path.extend(seg[1:])
                     else:
-                        combined_path.extend(seg)
-                return first_path_found, time_first_list, iteration_find_path, path_length_list, path_length_list, combined_path, combined_path
+                        first_combined_path.extend(seg)
+                        
+                if not self.search_until_max_iter:
+                    return first_path_found, time_first_list, iteration_list, path_length_first_list, path_length_first_list, first_combined_path, first_combined_path
 
         if all(best_paths):
             # 用剩余迭代次数优化后的路径
@@ -143,7 +145,7 @@ class VRRT_star:
                 else:
                     final_combined_path.extend(seg)
 
-            return first_path_found, time_first_list, iteration_find_path, path_length_list, best_costs, final_combined_path, final_combined_path
+            return first_path_found, time_first_list, iteration_list, path_length_first_list, best_costs, first_combined_path, final_combined_path
         
         return None, None, None, None, None, None, None
     
@@ -196,7 +198,7 @@ class VRRT_star:
         samples = mins + random_points * (maxs_expanded - mins_expanded)
         
         return samples
-        
+
     def get_nearest_node_index(self, node_array, rnd_array):
         """
         找到N-1棵树中，距离N-1个随机点最近的节点的索引
@@ -523,7 +525,7 @@ def calculate_path_length(path):
 if __name__ == '__main__':
     # 生成地图
     env_map = env_generator(
-        rho=0.4, 
+        rho=0.3,
         map_dim=(1500, 1500, 240),
         r_crash_range=(30, 50),
         r_risk_range=(3, 7),
@@ -531,10 +533,10 @@ if __name__ == '__main__':
         max_iter=10000,
         seed=2
     )
-    waypoints = [[0, 0, 0], [650, 380, 0], [1000, 680, 0], [1200, 1100, 0], [1500, 1500, 100]]
+    waypoints = [[0, 0, 0], [267, 270, 14], [450, 542, 27], [838, 833, 84], [1177, 1162, 53], [1500, 1500, 100]]
     obstacle_list = env_map["obstacles"]
     print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。")
-    # plot_map_and_waypoint(env_map, waypoints)
+    plot_map_and_waypoint(env_map, waypoints)
     
     # 设定 RRT* 参数
     r_agent_crash = 1.2
@@ -567,7 +569,7 @@ if __name__ == '__main__':
             expand_dis=30,
             search_radius=30,
             max_iter=2000,
-            search_until_max_iter=True
+            search_until_max_iter=False
         )
         start_time = time.time()
         first_path_found, time_first, iteration_find_path, path_length_list, path_length_final, first_path, final_best_path = rrt_star.planning()

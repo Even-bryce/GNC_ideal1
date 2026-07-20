@@ -3,7 +3,6 @@ import matplotlib.pyplot as plt
 import random
 import math
 import time
-import pickle
 from mpl_toolkits.mplot3d import Axes3D
 from env_generator_for_data import env_generator, env_generator_maze, env_generator_cluster
 from res_show import plot_map_and_waypoint, plot_tree_and_path
@@ -18,7 +17,7 @@ class Node:
         self.cost = 0.0         # 从起点到该节点的路径成本
 
 # 定义 RRT 类，用于实现 RRT 算法
-class VRRT_star_Bi:
+class VRRT_star_Bi_Bias:
     def __init__(self, env_map, waypoints, R_crash, R_risk, obstacle_list, expand_dis=25, max_iter=1500, search_radius=110, search_until_max_iter=True):
         """
         初始化 RRT 算法的参数
@@ -75,8 +74,20 @@ class VRRT_star_Bi:
             node_array_a = self.build_node_array(self.nodes_list_a)
             node_array_b = self.build_node_array(self.nodes_list_b)
             # 随机采样
-            random_nodes_array = self.sample_free_vectorized(waypoints_array)
-
+            root_a = self.nodes_list_a[0][0]
+            start_pt = waypoints_array[0]
+            starts = waypoints_array[:-1]
+            ends = waypoints_array[1:]
+            if not all(first_path_found):
+                if (root_a.x, root_a.y, root_a.z) == (start_pt[0], start_pt[1], start_pt[2]):
+                    # 当前树是起点树
+                    random_nodes_array = self.bias_sample_vectorized(waypoints_array, ends)
+                else:
+                    # 当前树是终点树
+                    random_nodes_array = self.bias_sample_vectorized(waypoints_array, starts)
+            else:
+                random_nodes_array = self.sample_free_vectorized(waypoints_array)
+            
             # 找到距离随机点最近的已有节点
             nearest_ind = self.get_nearest_node_index(node_array_a, random_nodes_array)
             nearest_nodes_list = [self.nodes_list_a[i][nearest_ind[i]] for i in range(len(nearest_ind))]
@@ -106,13 +117,10 @@ class VRRT_star_Bi:
                     # 检查是否可直接连接到另一棵树的最近节点
                     if goal_collision_results[j] and self.calc_distance(new_node, nearest_connect_nodes_list[j]) < 10 * self.expand_dis:
                         # 生成路径
-                        root_a = self.nodes_list_a[j][0]
-                        start_pt = waypoints_array[j]
                         if (root_a.x, root_a.y, root_a.z) == (start_pt[0], start_pt[1], start_pt[2]):
                             # 当前树是起点树
                             path_forward = self.generate_final_path_from_node(new_node)
                             path_backward = self.generate_final_path_from_node(nearest_connect_nodes_list[j])[::-1]
-                            
                         else:
                             # 当前树是终点树，交换路径顺序
                             path_forward = self.generate_final_path_from_node(nearest_connect_nodes_list[j])
@@ -164,27 +172,18 @@ class VRRT_star_Bi:
         return None, None, None, None, None, None, None
     
     def build_node_array(self, nodes_list):
-        num_trees = len(nodes_list)
-        if num_trees == 0:
-            return np.empty((0, 0, 3))
-        
-        # 1. 找出所有树中的最大节点数（最大长度）
         max_len = max(len(tree) for tree in nodes_list)
-        
-        # 2. 用 np.inf 预先分配最终的 NumPy 数组
-        # 形状为：(树的数量, 最大长度, 3)
-        result = np.full((num_trees, max_len, 3), np.inf)
-        
-        # 3. 使用切片将数据直接填充到数组中
-        for i, tree in enumerate(nodes_list):
-            if len(tree) == 0:
-                continue
-            # 一次性提取当前树所有节点的坐标
-            coords = [[node.x, node.y, node.z] for node in tree]
-            # 将坐标直接赋值给预先分配好的数组的对应位置
-            result[i, :len(tree), :] = coords
-        
-        return result
+        tree_arrays = []
+        for tree in nodes_list:
+            # 提取当前树所有节点的坐标，形状 (len(tree), 3)
+            coords = np.array([[node.x, node.y, node.z] for node in tree])
+            # 若节点数不足最大长度，用 np.inf 填充尾部
+            if len(tree) < max_len:
+                pad = np.full((max_len - len(tree), 3), np.inf)
+                coords = np.vstack([coords, pad])
+            tree_arrays.append(coords)
+        # 堆叠为 (num_trees, max_len, 3)
+        return np.array(tree_arrays)
     
     def sample_free_vectorized(self, waypoints_array):
         """
@@ -221,6 +220,49 @@ class VRRT_star_Bi:
         samples = mins + random_points * (maxs_expanded - mins_expanded)
         
         return samples
+    
+    def bias_sample_vectorized(self, waypoints_array, goal_array, bias_prob = 0.1):
+        """
+        向量化 bias-RRT 采样
+        waypoints: 航路点坐标数组 [[x1,y1,z1], [x2,y2,z2], ..., [xN,yN,zN]]
+        bias_prob: 以终点作为采样点的概率
+        return: N-1 个采样点坐标数组
+        """
+        # (n-1,3) 的起点与终点数组
+        starts = waypoints_array[:-1]
+        ends = waypoints_array[1:]
+        
+        # 每段航路的随机点生成范围
+        mins = np.minimum(starts, ends)
+        maxs = np.maximum(starts, ends)
+        
+        # 直接从 mins 和 maxs 得到扩展后的范围
+        mins_expanded = mins.copy()
+        maxs_expanded = maxs.copy()
+        mins_expanded[:, :2] -= 5 * self.expand_dis
+        maxs_expanded[:, :2] += 5 * self.expand_dis
+
+        # 裁剪到地图边界（假设 self.map_dim = [Lx, Ly, Lz]）
+        Lx, Ly, _ = self.env_map["map_dim"][0], self.env_map["map_dim"][1], self.env_map["map_dim"][2]
+        mins_expanded[:, :2] = np.clip(mins_expanded[:, :2], 0, [Lx, Ly])
+        maxs_expanded[:, :2] = np.clip(maxs_expanded[:, :2], 0, [Lx, Ly])
+        
+        # 生成 [0,1) 间的 (n-1,3) 随机数组
+        n_segments = len(starts)
+        
+        rnd_gen = np.random.default_rng()
+        random_points = rnd_gen.random((n_segments, 4))
+        
+        # 缩放得到采样点
+        samples = mins + random_points[:, :3] * (maxs_expanded - mins_expanded)
+        
+        # bias掩码
+        mask = random_points[:, 3] < bias_prob
+
+        # 根据掩码选择终点或采样点
+        samples = np.where(mask[:, np.newaxis], goal_array, samples)
+
+        return samples
         
     def get_nearest_node_index(self, node_array, rnd_array):
         """
@@ -242,23 +284,22 @@ class VRRT_star_Bi:
         return min_indices
     
     def steer(self, from_nodes, to_nodes_array):
-        """
-        从 from_nodes 向 to_nodes 扩展新节点
-        :param from_nodes: 起始节点
-        :param to_nodes: 目标节点
-        :return: 新节点
-        """
         from_coords = np.array([[node.x, node.y, node.z] for node in from_nodes])
         dir_vec = to_nodes_array - from_coords
         dist = np.linalg.norm(dir_vec, axis=1, keepdims=True)
-        step = np.minimum(self.expand_dis, dist)
-        new_coords = from_coords + (dir_vec / dist) * step
+        
         new_nodes = []
         for i in range(len(from_nodes)):
-            new_node = Node(new_coords[i, 0], new_coords[i, 1], new_coords[i, 2])
-            new_node.parent = from_nodes[i]
-            actual_dist = step[i, 0] if dist[i,0] > 0 else 0
-            new_node.cost = from_nodes[i].cost + actual_dist + self.risk_cost(new_node)
+            if dist[i, 0] == 0:   # 重合，不产生新节点，直接使用起始节点（也可返回 None）
+                new_node = Node(from_nodes[i].x, from_nodes[i].y, from_nodes[i].z)
+                new_node.parent = from_nodes[i]
+                new_node.cost = from_nodes[i].cost
+            else:
+                step = min(self.expand_dis, dist[i, 0])
+                new_coords = from_coords[i] + (dir_vec[i] / dist[i, 0]) * step
+                new_node = Node(new_coords[0], new_coords[1], new_coords[2])
+                new_node.parent = from_nodes[i]
+                new_node.cost = from_nodes[i].cost + step + self.risk_cost(new_node)
             new_nodes.append(new_node)
         return new_nodes
     
@@ -542,14 +583,6 @@ def calculate_path_length(path):
         length += math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)
     return length
 
-def load_test_case(filename):
-    with open(filename, "rb") as f:
-        loaded_data = pickle.load(f)
-    
-    env_map = loaded_data["env_map"]
-    final_waypoints = loaded_data["final_waypoints"]
-    return env_map, final_waypoints
-
 # ==========================================
 # 主程序
 # ==========================================
@@ -565,18 +598,18 @@ if __name__ == '__main__':
     #     seed=1
     # )
     # waypoints = [[0, 0, 0], [642, 833, 24], [1025, 1046, 77], [1500, 1500, 100]]
-    # env_map = env_generator_cluster(
-    #     map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
-    #     num_clusters=20,             # 建议 10~15 之间，保证有足够空间
-    #     chain_length_range=(1, 4),   # 每个簇的圆柱体数量
-    #     r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
-    #     r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
-    #     r_risk_range=(10, 20),       # 风险半径偏移量
-    #     zmax_range=(240, 240),
-    #     min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
-    #     seed=7,
-    # )   
-    env_map, waypoints = load_test_case('test_case_cluster.pkl')
+    env_map = env_generator_cluster(
+        map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
+        num_clusters=20,             # 建议 10~15 之间，保证有足够空间
+        chain_length_range=(1, 4),   # 每个簇的圆柱体数量
+        r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
+        r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
+        r_risk_range=(10, 20),       # 风险半径偏移量
+        zmax_range=(240, 240),
+        min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
+        seed=7,
+    )   
+    waypoints = [[0, 0, 0], [360, 806, 54], [832, 1415, 52], [1500, 1500, 100]]
     # env_map = env_generator_maze(
     #     grid_size=(4, 4),           # 4x4的网格，网格越多通道越窄越复杂
     #     map_dim=(1500, 1500, 240),
@@ -612,15 +645,15 @@ if __name__ == '__main__':
     for j in range(num_of_tests):
         # 初始化 RRT*
         print(f"\n测试 #{j + 1}")
-        rrt_star = VRRT_star_Bi(
+        rrt_star = VRRT_star_Bi_Bias(
             env_map=env_map,
             waypoints=waypoints,
             R_crash=r_agent_crash, 
             R_risk=r_agent_risk, 
             obstacle_list=obstacle_list, 
-            expand_dis=15,
+            expand_dis=10,
             search_radius=30,
-            max_iter=2000,
+            max_iter=10000,
             search_until_max_iter=True
         )
         start_time = time.time()

@@ -1,5 +1,12 @@
 import numpy as np
 import math
+import time
+from env_generator_for_data import env_generator, env_generator_maze, env_generator_cluster
+from res_show import plot_tree_and_path
+
+from planner_VRRT import VRRT
+from planner_VRRT_star import VRRT_star
+from planner_VRRT_star_APF import VRRT_star_APF
 
 def find_straight_waypoint(ori_path, env_map=None, epsilon=20.0, check_step=0.5, safety_margin=1.2, min_dist_ratio=0.1):
     """
@@ -167,3 +174,112 @@ def find_straight_waypoint(ori_path, env_map=None, epsilon=20.0, check_step=0.5,
     sparse_wps.append(goal_pt) # 锚点 2：终点绝不动
 
     return [pt.tolist() for pt in sparse_wps]
+
+def run_planning(planner_type, 
+                 start=(0.0, 0.0, 0.0), 
+                 goal=(1500.0, 1500.0, 100.0)):
+    """
+    使用指定的 RRT 规划器，在指定种子生成的地图中进行一次规划，
+    并返回简化后的航路点列表。
+
+    参数：
+        planner_type : str, 'VRRT', 'VRRT_star' 或 'VRRT_star_APF'
+        seed         : int, 地图随机种子
+        start, goal  : tuple, 起点和终点坐标
+
+    返回：
+        waypoints : list of [x,y,z] 或 None（规划失败时）
+    """
+
+    env_map = env_generator(
+        rho=0.3,
+        map_dim=(1500, 1500, 240),
+        r_crash_range=(30, 50),
+        r_risk_range=(3, 7),
+        zmax_range=(30, 240),
+        max_iter=10000,
+        seed=2
+    )
+    # env_map = env_generator_cluster(
+    #     map_dim=(1500, 1500, 240),
+    #     num_clusters=33,
+    #     chain_length_range=(2, 4), 
+    #     r_center_range=(70, 120),
+    #     r_edge_range=(20, 50), 
+    #     r_risk_range=(10, 20),
+    #     zmax_range=(240, 240),
+    #     min_center_dist=200, 
+    #     seed=7
+    # )
+    # env_map = env_generator_maze(
+    #     grid_size=(4, 4),           # 4x4的网格，网格越多通道越窄越复杂
+    #     map_dim=(1500, 1500, 240),
+    #     r_crash_range=(40, 60),     # 为了给通道留出足够空间，半径相较于你原来设定的(80,125)稍微缩小了一些
+    #     r_risk_range=(10, 20),
+    #     zmax_range=(240, 240),
+    #     seed=42
+    # )
+    obstacles = env_map["obstacles"]
+    waypoints = [list(start), list(goal)]
+
+    r_agent_crash = 1.2
+    r_agent_risk = 1.7
+    step_length = 50
+    max_iter = 5000
+
+    if planner_type == 'VRRT':
+        rrt = VRRT(
+            env_map=env_map,
+            waypoints=waypoints,
+            R_crash=r_agent_crash,
+            R_risk=r_agent_risk,
+            obstacle_list=obstacles,
+            expand_dis=step_length,
+            max_iter=max_iter
+        )
+    elif planner_type == 'VRRT_star':
+        rrt = VRRT_star(
+            env_map=env_map,
+            waypoints=waypoints,
+            R_crash=r_agent_crash,
+            R_risk=r_agent_risk,
+            obstacle_list=obstacles,
+            expand_dis=step_length,
+            search_radius=120,
+            max_iter=max_iter,
+            search_until_max_iter=True
+        )
+    elif planner_type == 'VRRT_star_APF':
+        rrt = VRRT_star_APF(
+            env_map=env_map,
+            waypoints=waypoints,
+            R_crash=r_agent_crash,
+            R_risk=r_agent_risk,
+            obstacle_list=obstacles,
+            expand_dis=step_length,
+            search_radius=120,
+            max_iter=max_iter
+        )
+    else:
+        raise ValueError(f"未知的规划器类型: {planner_type}")
+
+    result = rrt.planning()
+    if result[0] is None:
+        print("RRT 规划失败，未找到可行路径。")
+        return None
+    
+    first_path_found, time_first, iter_find, path_len_list, _,  first_path, final_best_path = result
+    plot_tree_and_path(env_map, first_path_found, final_best_path, waypoints)
+
+    # 5. 路径简化（提取关键航路点）
+    simplified_waypoints = find_straight_waypoint(final_best_path, env_map)
+    if simplified_waypoints is not None:
+        simplified_waypoints = [[round(x), round(y), round(z)] for x, y, z in simplified_waypoints]
+    
+    return simplified_waypoints
+
+if __name__ == "__main__":
+    wp = run_planning('VRRT_star')
+    if wp:
+        print(f"获得 {len(wp)} 个航路点：")
+        print(wp)

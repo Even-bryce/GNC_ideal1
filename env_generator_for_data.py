@@ -177,16 +177,16 @@ def env_generator_maze(
     return map_dict
 
 def env_generator_cluster(
-    map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
-    num_clusters=15,             # 建议 10~15 之间，保证有足够空间
-    chain_length_range=(1, 4),   # 每个簇的圆柱体数量
-    r_center_range=(70, 120),    # 接近地图中心的圆柱体半径范围
-    r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
-    r_risk_range=(10, 20),       # 风险半径偏移量
-    zmax_range=(30, 240),
-    min_center_dist=400,         # 【核心参数】任意两个簇中心点的最小绝对距离！
-    seed=None,
-):
+        map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
+        num_clusters=15,             # 建议 10~15 之间，保证有足够空间
+        chain_length_range=(1, 4),   # 每个簇的圆柱体数量
+        r_center_range=(70, 120),    # 接近地图中心的圆柱体半径范围
+        r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
+        r_risk_range=(10, 20),       # 风险半径偏移量
+        zmax_range=(30, 240),
+        min_center_dist=400,         # 【核心参数】任意两个簇中心点的最小绝对距离！
+        seed=None,
+    ):
     """
     先严格生成保持距离的簇中心，再根据中心位置动态决定半径生成圆柱簇
     """

@@ -3,7 +3,6 @@ import matplotlib.pyplot as plt
 import random
 import math
 import time
-import pickle
 from mpl_toolkits.mplot3d import Axes3D
 from env_generator_for_data import env_generator, env_generator_maze, env_generator_cluster
 from res_show import plot_map_and_waypoint, plot_tree_and_path
@@ -18,7 +17,7 @@ class Node:
         self.cost = 0.0         # 从起点到该节点的路径成本
 
 # 定义 RRT 类，用于实现 RRT 算法
-class VRRT_star_Bi:
+class VRRT_star_Bi_APF:
     def __init__(self, env_map, waypoints, R_crash, R_risk, obstacle_list, expand_dis=25, max_iter=1500, search_radius=110, search_until_max_iter=True):
         """
         初始化 RRT 算法的参数
@@ -59,6 +58,20 @@ class VRRT_star_Bi:
         self.nodes_list_b = [[Node(coord[0], coord[1], coord[2])] for coord in node_array_b[:, 0, :]]
         
         num_trees = len(self.nodes_list_a)
+        # 起点节点列表
+        goal_nodes_list_a = []
+        for i in range(num_trees):
+            node = Node(waypoints_array[i, 0], waypoints_array[i, 1], waypoints_array[i, 2])
+            node.parent = None
+            node.cost = float('inf')
+            goal_nodes_list_a.append(node)
+        # 终点节点列表
+        goal_nodes_list_b = []
+        for i in range(1, num_trees + 1):
+            node = Node(waypoints_array[i, 0], waypoints_array[i, 1], waypoints_array[i, 2])
+            node.parent = None
+            node.cost = float('inf')
+            goal_nodes_list_b.append(node)
         
         first_path_found = np.full(num_trees, False, dtype=bool)
         first_path = np.full(num_trees, None, dtype=object)
@@ -82,7 +95,7 @@ class VRRT_star_Bi:
             nearest_nodes_list = [self.nodes_list_a[i][nearest_ind[i]] for i in range(len(nearest_ind))]
 
             # 计算扩展方向并生成新节点
-            new_nodes_list = self.steer(nearest_nodes_list, random_nodes_array)
+            new_nodes_list = self.apf_steer(nearest_nodes_list, random_nodes_array, goal_nodes_list_b)
             
             # 找到距离新节点最近的另一棵树中的节点
             new_nodes_array = np.array([[node.x, node.y, node.z] for node in new_nodes_list])
@@ -149,6 +162,7 @@ class VRRT_star_Bi:
                     return first_path_found, time_first_list, iteration_list, path_length_first_list, path_length_first_list, first_combined_path, first_combined_path
             
             self.nodes_list_a, self.nodes_list_b = self.nodes_list_b, self.nodes_list_a
+            goal_nodes_list_a, goal_nodes_list_b = goal_nodes_list_a, goal_nodes_list_b
 
         if all(best_paths):
             # 用剩余迭代次数优化后的路径
@@ -164,27 +178,18 @@ class VRRT_star_Bi:
         return None, None, None, None, None, None, None
     
     def build_node_array(self, nodes_list):
-        num_trees = len(nodes_list)
-        if num_trees == 0:
-            return np.empty((0, 0, 3))
-        
-        # 1. 找出所有树中的最大节点数（最大长度）
         max_len = max(len(tree) for tree in nodes_list)
-        
-        # 2. 用 np.inf 预先分配最终的 NumPy 数组
-        # 形状为：(树的数量, 最大长度, 3)
-        result = np.full((num_trees, max_len, 3), np.inf)
-        
-        # 3. 使用切片将数据直接填充到数组中
-        for i, tree in enumerate(nodes_list):
-            if len(tree) == 0:
-                continue
-            # 一次性提取当前树所有节点的坐标
-            coords = [[node.x, node.y, node.z] for node in tree]
-            # 将坐标直接赋值给预先分配好的数组的对应位置
-            result[i, :len(tree), :] = coords
-        
-        return result
+        tree_arrays = []
+        for tree in nodes_list:
+            # 提取当前树所有节点的坐标，形状 (len(tree), 3)
+            coords = np.array([[node.x, node.y, node.z] for node in tree])
+            # 若节点数不足最大长度，用 np.inf 填充尾部
+            if len(tree) < max_len:
+                pad = np.full((max_len - len(tree), 3), np.inf)
+                coords = np.vstack([coords, pad])
+            tree_arrays.append(coords)
+        # 堆叠为 (num_trees, max_len, 3)
+        return np.array(tree_arrays)
     
     def sample_free_vectorized(self, waypoints_array):
         """
@@ -241,24 +246,65 @@ class VRRT_star_Bi:
         
         return min_indices
     
-    def steer(self, from_nodes, to_nodes_array):
+    def apf_steer(self, from_nodes, to_nodes_array, goal_nodes_list):
         """
-        从 from_nodes 向 to_nodes 扩展新节点
-        :param from_nodes: 起始节点
-        :param to_nodes: 目标节点
-        :return: 新节点
+        从 from_nodes 向合力方向扩展新节点，合力 = 指向采样点的引力 + 指向终点的引力 + 障碍物斥力
+        :param from_nodes: 起始节点列表
+        :param to_nodes_array: 随机采样点数组 (N-1, 3)
+        :return: 新节点列表
         """
-        from_coords = np.array([[node.x, node.y, node.z] for node in from_nodes])
-        dir_vec = to_nodes_array - from_coords
-        dist = np.linalg.norm(dir_vec, axis=1, keepdims=True)
-        step = np.minimum(self.expand_dis, dist)
-        new_coords = from_coords + (dir_vec / dist) * step
+        from_coords = np.array([[node.x, node.y, node.z] for node in from_nodes], dtype=float)
+        to_nodes_array = np.asarray(to_nodes_array, dtype=float)
+        goal_coords = np.array([[node.x, node.y, node.z] for node in goal_nodes_list], dtype=float)
+
+        # 采样点引力方向
+        rand_dir = to_nodes_array - from_coords
+        rand_dist = np.linalg.norm(rand_dir, axis=1, keepdims=True)
+        rand_unit = np.where(rand_dist > 0, rand_dir / rand_dist, 0.0)
+
+        # 目标点引力方向
+        goal_dir = goal_coords - from_coords
+        goal_dist = np.linalg.norm(goal_dir, axis=1, keepdims=True)
+        goal_unit = np.divide(goal_dir, goal_dist, where=goal_dist > 0, out=np.zeros_like(goal_dir))
+
+        # 障碍物斥力
+        repulsion = np.zeros_like(from_coords)
+        for i, node in enumerate(from_nodes):
+            fx, fy = 0.0, 0.0
+            for obs in self.obstacle_list:
+                xc, yc, zmin, zmax, r_crash, r_risk = obs
+                if node.z < zmin or node.z > zmax:
+                    continue
+                dx = node.x - xc
+                dy = node.y - yc
+                dist_h = math.hypot(dx, dy)
+                if dist_h <= r_risk and r_risk > 0:
+                    mag = (r_risk - dist_h) / r_risk
+                    if dist_h > 1e-6:
+                        dir_x = dx / dist_h
+                        dir_y = dy / dist_h
+                    else:
+                        dir_x, dir_y = 0.0, 0.0
+                    fx += mag * dir_x
+                    fy += mag * dir_y
+            repulsion[i, 0] = fx
+            repulsion[i, 1] = fy
+
+        # 合力
+        total_force = rand_unit + 0.5 * goal_unit + repulsion
+        force_norm = np.linalg.norm(total_force, axis=1, keepdims=True)
+        unit_dir = np.where(force_norm > 0, total_force / force_norm, rand_unit)
+
+        # 扩展步长
+        new_coords = from_coords + unit_dir * self.expand_dis
+
+        # 创建新节点
         new_nodes = []
         for i in range(len(from_nodes)):
             new_node = Node(new_coords[i, 0], new_coords[i, 1], new_coords[i, 2])
             new_node.parent = from_nodes[i]
-            actual_dist = step[i, 0] if dist[i,0] > 0 else 0
-            new_node.cost = from_nodes[i].cost + actual_dist + self.risk_cost(new_node)
+            actual_dist = self.calc_distance(from_nodes[i], new_node)
+            new_node.cost = from_nodes[i].cost + actual_dist
             new_nodes.append(new_node)
         return new_nodes
     
@@ -542,50 +588,21 @@ def calculate_path_length(path):
         length += math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)
     return length
 
-def load_test_case(filename):
-    with open(filename, "rb") as f:
-        loaded_data = pickle.load(f)
-    
-    env_map = loaded_data["env_map"]
-    final_waypoints = loaded_data["final_waypoints"]
-    return env_map, final_waypoints
-
 # ==========================================
 # 主程序
 # ==========================================
 if __name__ == '__main__':
     # 生成地图
-    # env_map = env_generator(
-    #     rho=0.4, 
-    #     map_dim=(1500, 1500, 240),
-    #     r_crash_range=(30, 50),
-    #     r_risk_range=(3, 7),
-    #     zmax_range=(30, 240),
-    #     max_iter=10000,
-    #     seed=1
-    # )
-    # waypoints = [[0, 0, 0], [642, 833, 24], [1025, 1046, 77], [1500, 1500, 100]]
-    # env_map = env_generator_cluster(
-    #     map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
-    #     num_clusters=20,             # 建议 10~15 之间，保证有足够空间
-    #     chain_length_range=(1, 4),   # 每个簇的圆柱体数量
-    #     r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
-    #     r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
-    #     r_risk_range=(10, 20),       # 风险半径偏移量
-    #     zmax_range=(240, 240),
-    #     min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
-    #     seed=7,
-    # )   
-    env_map, waypoints = load_test_case('test_case_cluster.pkl')
-    # env_map = env_generator_maze(
-    #     grid_size=(4, 4),           # 4x4的网格，网格越多通道越窄越复杂
-    #     map_dim=(1500, 1500, 240),
-    #     r_crash_range=(40, 60),     # 为了给通道留出足够空间，半径相较于你原来设定的(80,125)稍微缩小了一些
-    #     r_risk_range=(10, 20),
-    #     zmax_range=(240, 240),
-    #     seed=42
-    # )
-    # waypoints = [[0, 200, 0], [549, 383, 60], [1165, 666, 63], [1063, 1170, 31], [1500, 1300, 100]]
+    env_map = env_generator(
+        rho=0.4, 
+        map_dim=(1500, 1500, 240),
+        r_crash_range=(30, 50),
+        r_risk_range=(3, 7),
+        zmax_range=(30, 240),
+        max_iter=10000,
+        seed=2
+    )
+    waypoints = [[0, 0, 0], [650, 380, 0], [1000, 680, 0], [1200, 1100, 0], [1500, 1500, 100]]
     obstacle_list = env_map["obstacles"]
     print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。")
     # plot_map_and_waypoint(env_map, waypoints)
@@ -612,13 +629,13 @@ if __name__ == '__main__':
     for j in range(num_of_tests):
         # 初始化 RRT*
         print(f"\n测试 #{j + 1}")
-        rrt_star = VRRT_star_Bi(
+        rrt_star = VRRT_star_Bi_APF(
             env_map=env_map,
             waypoints=waypoints,
             R_crash=r_agent_crash, 
             R_risk=r_agent_risk, 
             obstacle_list=obstacle_list, 
-            expand_dis=15,
+            expand_dis=10,
             search_radius=30,
             max_iter=2000,
             search_until_max_iter=True

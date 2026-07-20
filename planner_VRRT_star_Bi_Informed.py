@@ -4,7 +4,7 @@ import random
 import math
 import time
 from mpl_toolkits.mplot3d import Axes3D
-from env_generator_for_data import env_generator
+from env_generator_for_data import env_generator, env_generator_maze, env_generator_cluster
 from res_show import plot_map_and_waypoint, plot_tree_and_path
 
 # 定义 Node 类，用于表示树中的每个节点
@@ -17,7 +17,7 @@ class Node:
         self.cost = 0.0         # 从起点到该节点的路径成本
 
 # 定义 RRT 类，用于实现 RRT 算法
-class VRRT_star:
+class VRRT_star_Bi_Informed:
     def __init__(self, env_map, waypoints, R_crash, R_risk, obstacle_list, expand_dis=25, max_iter=1500, search_radius=110, search_until_max_iter=True):
         """
         初始化 RRT 算法的参数
@@ -61,9 +61,9 @@ class VRRT_star:
         
         first_path_found = np.full(num_trees, False, dtype=bool)
         first_path = np.full(num_trees, None, dtype=object)
-        iteration_find_path = np.zeros(num_trees, dtype=int)
+        iteration_list = np.zeros(num_trees, dtype=int)
         time_first_list = [None] * num_trees
-        path_length_list = [None] * num_trees
+        path_length_first_list = [None] * num_trees
         
         best_paths = np.full(num_trees, None, dtype=object)
         best_costs = [np.inf] * num_trees
@@ -78,8 +78,8 @@ class VRRT_star:
 
             # 已找到路径的航段替换为椭球采样
             if self.search_until_max_iter:
-                for j in range(num_trees):
-                    if first_path_found[j]:
+                if all(first_path_found):
+                    for j in range(num_trees):
                         # 获取起点、终点
                         start = waypoints_array[j]
                         goal = waypoints_array[j + 1]
@@ -135,11 +135,11 @@ class VRRT_star:
                         if not first_path_found[j]:
                             first_path_found[j] = True
                             time_first_list[j] = time.time() - start_time
-                            iteration_find_path[j] = i
+                            iteration_list[j] = i
                             first_path[j] = full_path
-                            path_length_list[j] = path_cost
-                            
-                            best_costs[j] = path_length_list[j]
+                            path_length_first_list[j] = path_cost
+
+                            best_costs[j] = path_length_first_list[j]
                             best_paths[j] = first_path[j]
                             
                         if self.search_until_max_iter and first_path_found[j]:
@@ -147,15 +147,17 @@ class VRRT_star:
                                 best_costs[j] = path_cost
                                 best_paths[j] = full_path
                                 
-            if not self.search_until_max_iter and all(first_path_found):
+            if all(first_path_found):
                 # 合并所有航路段
-                combined_path = []
+                first_combined_path = []
                 for seg in first_path:
-                    if combined_path and combined_path[-1] == seg[0]:
-                        combined_path.extend(seg[1:])
+                    if first_combined_path and first_combined_path[-1] == seg[0]:
+                        first_combined_path.extend(seg[1:])
                     else:
-                        combined_path.extend(seg)
-                return first_path_found, time_first_list, iteration_find_path, path_length_list, path_length_list, combined_path, combined_path
+                        first_combined_path.extend(seg)
+                        
+                if not self.search_until_max_iter:
+                    return first_path_found, time_first_list, iteration_list, path_length_first_list, path_length_first_list, first_combined_path, first_combined_path
             
             self.nodes_list_a, self.nodes_list_b = self.nodes_list_b, self.nodes_list_a
 
@@ -168,8 +170,8 @@ class VRRT_star:
                 else:
                     final_combined_path.extend(seg)
 
-            return first_path_found, time_first_list, iteration_find_path, path_length_list, best_costs, final_combined_path, final_combined_path
-
+            return first_path_found, time_first_list, iteration_list, path_length_first_list, best_costs, first_combined_path, final_combined_path
+        
         return None, None, None, None, None, None, None
 
     def _sample_informed_ellipsoid(self, start, goal, c_max):
@@ -632,7 +634,7 @@ if __name__ == '__main__':
     for j in range(num_of_tests):
         # 初始化 RRT*
         print(f"\n测试 #{j + 1}")
-        rrt_star = VRRT_star(
+        rrt_star = VRRT_star_Bi_Informed(
             env_map=env_map,
             waypoints=waypoints,
             R_crash=r_agent_crash, 

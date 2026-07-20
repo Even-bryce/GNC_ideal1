@@ -4,7 +4,7 @@ import random
 import math
 import time
 from mpl_toolkits.mplot3d import Axes3D
-from env_generator_for_data import env_generator
+from env_generator_for_data import env_generator, env_generator_maze, env_generator_cluster
 from res_show import plot_map_and_waypoint, plot_tree_and_path
 
 # 定义 Node 类，用于表示树中的每个节点
@@ -63,7 +63,7 @@ class VRRT:
             
         first_path_found = np.full(num_trees, False, dtype=bool)
         first_path = np.full(num_trees, None, dtype=object)
-        iteration_find_path = np.zeros(num_trees, dtype=int)
+        iteration_list = np.zeros(num_trees, dtype=int)
         time_first_list = [None] * num_trees
         path_length_list = [None] * num_trees
         
@@ -104,7 +104,7 @@ class VRRT:
                         path_length_list[j] = calculate_path_length(first_path[j])
                         
                         # 首次找到路径的迭代轮数
-                        iteration_find_path[j] = i
+                        iteration_list[j] = i
                         
             if all(first_path_found):
                 # 合并所有航路段
@@ -114,7 +114,7 @@ class VRRT:
                         combined_path.extend(seg[1:])
                     else:
                         combined_path.extend(seg)
-                return first_path_found, time_first_list, iteration_find_path, path_length_list, combined_path
+                return first_path_found, time_first_list, iteration_list, path_length_list, combined_path
 
         return None, None, None, None, None
     

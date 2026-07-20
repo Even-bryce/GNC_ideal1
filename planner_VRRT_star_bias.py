@@ -215,23 +215,22 @@ class VRRT_star_bias:
         return min_indices
     
     def steer(self, from_nodes, to_nodes_array):
-        """
-        从 from_nodes 向 to_nodes 扩展新节点
-        :param from_nodes: 起始节点
-        :param to_nodes: 目标节点
-        :return: 新节点
-        """
         from_coords = np.array([[node.x, node.y, node.z] for node in from_nodes])
         dir_vec = to_nodes_array - from_coords
         dist = np.linalg.norm(dir_vec, axis=1, keepdims=True)
-        step = np.minimum(self.expand_dis, dist)
-        new_coords = from_coords + (dir_vec / dist) * step
+        
         new_nodes = []
         for i in range(len(from_nodes)):
-            new_node = Node(new_coords[i, 0], new_coords[i, 1], new_coords[i, 2])
-            new_node.parent = from_nodes[i]
-            actual_dist = step[i, 0] if dist[i,0] > 0 else 0
-            new_node.cost = from_nodes[i].cost + actual_dist + self.risk_cost(new_node)
+            if dist[i, 0] == 0:   # 重合，不产生新节点，直接使用起始节点（也可返回 None）
+                new_node = Node(from_nodes[i].x, from_nodes[i].y, from_nodes[i].z)
+                new_node.parent = from_nodes[i]
+                new_node.cost = from_nodes[i].cost
+            else:
+                step = min(self.expand_dis, dist[i, 0])
+                new_coords = from_coords[i] + (dir_vec[i] / dist[i, 0]) * step
+                new_node = Node(new_coords[0], new_coords[1], new_coords[2])
+                new_node.parent = from_nodes[i]
+                new_node.cost = from_nodes[i].cost + step + self.risk_cost(new_node)
             new_nodes.append(new_node)
         return new_nodes
     

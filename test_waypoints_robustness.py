@@ -129,7 +129,7 @@ if __name__ == '__main__':
     
     if map_type == 'homogeneous':
         env_map = env_generator(
-            rho=0.3,
+            rho=0.4,
             map_dim=(1500, 1500, 240),
             r_crash_range=(30, 50),
             r_risk_range=(3, 7),
@@ -229,54 +229,85 @@ if __name__ == '__main__':
               f"| 成功率: {succ/num_of_tests*100:.1f}% "
               + (f"| 平均时间: {ti:.2f}" if ti is not None else "| 失败"))
 
-    # 保存目录
+    # 检查基准组（组1）是否有效
+    if avg_times[0] is None or avg_lengths_first[0] is None or avg_lengths_final[0] is None:
+        raise ValueError("基准航路点组1没有成功规划，无法进行相对比较。")
+
+    base_time = avg_times[0]
+    base_len_first = avg_lengths_first[0]
+    base_len_final = avg_lengths_final[0]
+
+    # 计算相对偏差（百分比），仅对有效组
+    rel_times = []
+    rel_lens_first = []
+    rel_lens_final = []
+    for i in range(1, len(avg_times)):
+        t = avg_times[i]
+        lf = avg_lengths_first[i]
+        lfl = avg_lengths_final[i]
+        if t is not None:
+            rel_times.append(((t - base_time) / base_time) * 100)
+        if lf is not None:
+            rel_lens_first.append(((lf - base_len_first) / base_len_first) * 100)
+        if lfl is not None:
+            rel_lens_final.append(((lfl - base_len_final) / base_len_final) * 100)
+
+    # 创建保存目录
     script_dir = os.path.dirname(os.path.abspath(__file__))
     save_dir = os.path.join(script_dir, 'test_results')
     os.makedirs(save_dir, exist_ok=True)
 
-    # 绘图
+    # 绘图 —— 三张子图，每张展示相对基准的垂直分布
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    metrics = [
+        (axes[0], rel_times, 'Avg First Time', base_time, 's'),
+        (axes[1], rel_lens_first, 'Avg First Length', base_len_first, 'm'),
+        (axes[2], rel_lens_final, 'Avg Final Length', base_len_final, 'm'),
+    ]
 
-    # 只绘制有效数据
-    valid = [ti is not None for ti in avg_times]
-    x_val = np.array(indices)[valid]
-    y_time = np.array(avg_times)[valid]
-    y_len_first = np.array(avg_lengths_first)[valid]
-    y_len_final = np.array(avg_lengths_final)[valid]
+    for ax, rel_vals, title, base_val, unit in metrics:
+        if not rel_vals:
+            ax.text(0.5, 0.5, '无有效数据', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(title)
+            continue
 
-    # 子图1: 平均耗时
-    ax = axes[0]
-    ax.plot(x_val, y_time, 's-', linewidth=2, markersize=6)
-    ax.set_xlabel('Waypoint Set Index')
-    ax.set_title('Avg time ~ waypoint set')
-    ax.set_xticks(x_val)
-    ax.set_xticklabels([f'{i+1}' for i in x_val])
-    ax.grid(True)
+        # 基准线（y=0）
+        ax.axhline(0, color='gray', linewidth=1, linestyle='--', label=f'base: {base_val:.3f} {unit}')
 
-    # 子图2: 首次路径长度
-    ax = axes[1]
-    ax.plot(x_val, y_len_first, '^-', linewidth=2, markersize=6)
-    ax.set_xlabel('Waypoint Set Index')
-    ax.set_title('Avg first length ~ waypoint set')
-    ax.set_xticks(x_val)
-    ax.set_xticklabels([f'{i+1}' for i in x_val])
-    ax.grid(True)
-    
-    # 子图3: 最终路径长度
-    ax = axes[2]
-    ax.plot(x_val, y_len_final, 'o-', linewidth=2, markersize=6)
-    ax.set_xlabel('Waypoint Set Index')
-    ax.set_title('Avg final length ~ waypoint set')
-    ax.set_xticks(x_val)
-    ax.set_xticklabels([f'{i+1}' for i in x_val])
-    ax.grid(True)
+        # 所有相对偏差数据点排在 x=1 的垂直线上
+        x = np.ones_like(rel_vals)
+        # 添加少量横向抖动避免完全重叠（可选）
+        jitter = np.random.default_rng(42).uniform(-0.05, 0.05, size=len(rel_vals))
+        ax.scatter(x + jitter, rel_vals, color='steelblue', alpha=0.7, s=40, zorder=3)
 
-    # 添加总标题
-    plt.suptitle(f'Waypoint Set Comparison — {planner_type}')
+        # 误差棒形式：从最小值到最大值的垂直线段，加两端横线
+        y_min = np.min(rel_vals)
+        y_max = np.max(rel_vals)
+        ax.plot([1, 1], [y_min, y_max], color='darkred', linewidth=2, zorder=2)
+        ax.plot([0.9, 1.1], [y_min, y_min], color='darkred', linewidth=2)
+        ax.plot([0.9, 1.1], [y_max, y_max], color='darkred', linewidth=2)
+
+        # 标注最大和最小相对偏差
+        ax.annotate(f'{y_max:+.1f}%', xy=(1, y_max), xytext=(1.3, y_max),
+                    arrowprops=dict(arrowstyle='->', color='darkred'),
+                    fontsize=9, color='darkred', va='center')
+        ax.annotate(f'{y_min:+.1f}%', xy=(1, y_min), xytext=(1.3, y_min),
+                    arrowprops=dict(arrowstyle='->', color='darkred'),
+                    fontsize=9, color='darkred', va='center')
+
+        # 美化坐标轴
+        ax.set_xlim(0.5, 1.8)  # 留出标注空间
+        ax.set_xticks([1])
+        ax.set_xticklabels(['Set 2-20'])
+        ax.set_ylabel('Relative Error (%)')
+        ax.set_title(title)
+        ax.grid(True, axis='y', alpha=0.3)
+        ax.legend(loc='upper left', fontsize=8)
+
+    plt.suptitle(f'Waypoint Robustness Test — {planner_type}')
     plt.tight_layout()
 
-    # 保存图片
-    save_path = os.path.join(save_dir, f'test_waypoint_{planner_type}_{map_type}.png')
+    save_path = os.path.join(save_dir, f'test_waypoint_robustness_{planner_type}_{map_type}.png')
     plt.savefig(save_path, dpi=150)
     print(f"图片已保存至: {save_path}")
     plt.show()

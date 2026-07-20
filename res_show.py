@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
 from matplotlib.patches import Circle
 from matplotlib.lines import Line2D
-from env_generator_for_data import env_generator
+from env_generator_for_data import env_generator, env_generator_maze, env_generator_cluster
 
 def add_cylinder(ax, xc, yc, zmin, zmax, radius, color, alpha=1.0, wireframe=False, resolution=20):
     """
@@ -301,14 +301,40 @@ def plot_map_and_waypoint(env_map, waypoints):
     
 if __name__ == '__main__':
     # 生成地图
-    env_map = env_generator(
-        rho=0.4, 
+
+    # env_map = env_generator(
+    #     rho=0.4,
+    #     map_dim=(1500, 1500, 240),
+    #     r_crash_range=(30, 50),
+    #     r_risk_range=(3, 7),
+    #     zmax_range=(30, 240),
+    #     max_iter=10000,
+    #     seed=1
+    # )
+    # waypoints = [[0, 0, 0], [332, 467, 14], [616, 802, 24], [1027, 1028, 77], [1237, 1277, 67], [1500, 1500, 100]]
+    
+    # env_map = env_generator_cluster(
+    #     map_dim=(1500, 1500, 240),   # (Lx, Ly, Lz)
+    #     num_clusters=20,             # 建议 10~15 之间，保证有足够空间
+    #     chain_length_range=(1, 4),   # 每个簇的圆柱体数量
+    #     r_center_range=(100, 150),    # 接近地图中心的圆柱体半径范围
+    #     r_edge_range=(20, 50),       # 接近地图边缘的圆柱体半径范围
+    #     r_risk_range=(10, 20),       # 风险半径偏移量
+    #     zmax_range=(240, 240),
+    #     min_center_dist=200,         # 【核心参数】任意两个簇中心点的最小绝对距离！
+    #     seed=7,
+    # )   
+    # waypoints = [[0, 0, 0], [360, 806, 54], [832, 1415, 52], [1109, 1491, 85], [1500, 1500, 100]]
+    
+    
+    
+    env_map = env_generator_maze(
+        grid_size=(4, 4),           # 4x4的网格，网格越多通道越窄越复杂
         map_dim=(1500, 1500, 240),
-        r_crash_range=(30, 50),
-        r_risk_range=(3, 7),
-        zmax_range=(30, 240),
-        max_iter=10000,
-        seed=2
+        r_crash_range=(40, 60),     # 为了给通道留出足够空间，半径相较于你原来设定的(80,125)稍微缩小了一些
+        r_risk_range=(10, 20),
+        zmax_range=(240, 240),
+        seed=42
     )
-    waypoints = [[0, 0, 0], [700, 380, 0], [1000, 680, 0], [1200, 1100, 0], [1500, 1500, 100]]
+    waypoints = [[0, 200, 0], [551, 362, 33], [1136, 695, 36], [1072, 1163, 73], [1500, 1300, 100]]
     plot_map_and_waypoint(env_map, waypoints)
