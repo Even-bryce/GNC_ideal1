@@ -18,7 +18,7 @@ class Node:
         self.parent = None      # 节点的父节点，用于回溯路径
         self.cost = 0.0         # 从起点到该节点的路径成本
 
-class RRT_star_DBVSB_APF:
+class RRT_star_DBVSB_APF_Informed:
     def __init__(self, start, goal, R_crash, R_risk, obstacle_list, env_map, 
                  expand_dis=20, max_iter=1500, search_radius=100.0, 
                  search_until_max_iter=True):
@@ -78,8 +78,12 @@ class RRT_star_DBVSB_APF:
                 else:
                     rnd = self.DBVSB_sample(self.node_list_a, self.start)
                     # rnd = self.sample_free()
+
             else:
-                rnd = self.sample_free()
+                if self.search_until_max_iter:
+                    rnd = self.informed_sample(path_length_final)
+                else:
+                    rnd = self.sample_free()
             
             # 找到距离随机点最近的已有节点
             nearest_ind = self.get_nearest_node_index(self.node_list_a, rnd)
@@ -159,6 +163,90 @@ class RRT_star_DBVSB_APF:
                rnd_gen.uniform(0, max_y_rand),
                rnd_gen.uniform(0, z_rand)]
         return rnd
+    
+    def informed_sample(self, best_path_length):
+        """
+        在椭球体内进行均匀采样
+        以 start 和 goal 为焦点，长轴长度为 best_path_length。
+        """
+        # 起点和终点坐标
+        sx, sy, sz = self.start.x, self.start.y, self.start.z
+        gx, gy, gz = self.goal.x, self.goal.y, self.goal.z
+
+        # 计算起点到终点的向量和距离 (2 * c)
+        dx, dy, dz = gx - sx, gy - sy, gz - sz
+        c = math.sqrt(dx*dx + dy*dy + dz*dz) * 0.5          # 半焦距
+        a = best_path_length * 0.5                          # 半长轴
+
+        # 半短轴（两个方向相等，形成旋转对称椭球）
+        b = math.sqrt(a*a - c*c)
+
+        # 在单位球内均匀采样
+        while True:
+            # 在[-1,1]^3中均匀采样，拒绝法保证在单位球内
+            x = random.uniform(-1, 1)
+            y = random.uniform(-1, 1)
+            z = random.uniform(-1, 1)
+            if x*x + y*y + z*z <= 1.0:
+                break
+
+        # 缩放为椭球（长轴沿 x 方向，短轴沿 y,z）
+        x_ell = a * x
+        y_ell = b * y
+        z_ell = b * z
+
+        # 构造旋转矩阵：将 x 轴对齐到起点→终点方向
+        # 使用 Rodrigues 旋转公式，或构造正交基
+        if c > 1e-6:  # 起点终点不重合
+            # 单位方向向量
+            ux, uy, uz = dx / (2*c), dy / (2*c), dz / (2*c)
+            # 选择任意一个与 u 不平行的向量作为参考
+            if abs(ux) < 0.9:
+                vx, vy, vz = 1.0, 0.0, 0.0
+            else:
+                vx, vy, vz = 0.0, 1.0, 0.0
+            # 构造正交基 e1 = u, e2 = u × v 归一化, e3 = u × e2
+            e1x, e1y, e1z = ux, uy, uz
+            # 叉积 u × v
+            w_x = uy * vz - uz * vy
+            w_y = uz * vx - ux * vz
+            w_z = ux * vy - uy * vx
+            w_norm = math.sqrt(w_x*w_x + w_y*w_y + w_z*w_z)
+            if w_norm < 1e-6:
+                # 若平行，重新选择 v
+                vx, vy, vz = 0.0, 0.0, 1.0
+                w_x = uy * vz - uz * vy
+                w_y = uz * vx - ux * vz
+                w_z = ux * vy - uy * vx
+                w_norm = math.sqrt(w_x*w_x + w_y*w_y + w_z*w_z)
+            e2x, e2y, e2z = w_x / w_norm, w_y / w_norm, w_z / w_norm
+            # e3 = u × e2
+            e3x = uy * e2z - uz * e2y
+            e3y = uz * e2x - ux * e2z
+            e3z = ux * e2y - uy * e2x
+            # 将椭球点从标准坐标系旋转到目标坐标系
+            px = e1x * x_ell + e2x * y_ell + e3x * z_ell
+            py = e1y * x_ell + e2y * y_ell + e3y * z_ell
+            pz = e1z * x_ell + e2z * y_ell + e3z * z_ell
+        else:
+            # 起点终点重合，退化为以该点为中心的球
+            px, py, pz = x_ell, y_ell, z_ell
+
+        # 平移至椭球中心（起点和终点的中点）
+        cx, cy, cz = (sx + gx) / 2.0, (sy + gy) / 2.0, (sz + gz) / 2.0
+        sample_x = px + cx
+        sample_y = py + cy
+        sample_z = pz + cz
+
+        # 裁剪到地图范围内（以防数值误差导致越界）
+        max_x = self.env_map["map_dim"][0]
+        max_y = self.env_map["map_dim"][1]
+        max_z = self.env_map["map_dim"][2]
+        sample_x = max(0, min(max_x, sample_x))
+        sample_y = max(0, min(max_y, sample_y))
+        sample_z = max(0, min(max_z, sample_z))
+
+        return [sample_x, sample_y, sample_z]
     
     def DBVSB_sample(self, node_list, target_node, goal_bias_rate=0.05):
         """
@@ -657,7 +745,7 @@ if __name__ == '__main__':
         env_success_count = 0
         for j in range(num_of_tests):
             # 初始化 RRT*
-            rrt_star = RRT_star_DBVSB_APF(
+            rrt_star = RRT_star_DBVSB_APF_Informed(
                 start=start, 
                 goal=goal, 
                 R_crash=r_agent_crash, 

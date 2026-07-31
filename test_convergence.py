@@ -5,9 +5,9 @@ import sys
 import time
 from datetime import datetime
 from env_generator_for_data import env_generator
-from planner_VRRT import VRRT
-from planner_VRRT_star import VRRT_star
-from planner_VRRT_star_APF import VRRT_star_APF
+from planner_VRRT_star.planner_VRRT import VRRT
+from planner_VRRT_star.planner_VRRT_star import VRRT_star
+from planner_VRRT_star.planner_VRRT_star_APF import VRRT_star_APF
 
 def plot_running_averages(data_list, labels, step, planner_name='', figsize=(18, 5),
                            ylim_expand=0.3, save_dir='plots'):

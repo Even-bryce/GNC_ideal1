@@ -4,11 +4,11 @@ import matplotlib.pyplot as plt
 from multiprocessing import Pool, current_process
 import os
 from env_generator_for_data import env_generator, env_generator_maze, env_generator_cluster
-from planner_VRRT import VRRT
-from planner_VRRT_star import VRRT_star
-from planner_VRRT_star_APF import VRRT_star_APF
-from planner_VRRT_star_Bi import VRRT_star_Bi
-from planner_VRRT_star_Bi_Informed import VRRT_star_Bi_Informed
+from planner_VRRT_star.planner_VRRT import VRRT
+from planner_VRRT_star.planner_VRRT_star import VRRT_star
+from planner_VRRT_star.planner_VRRT_star_APF import VRRT_star_APF
+from planner_VRRT_star.planner_VRRT_star_Bi import VRRT_star_Bi
+from planner_VRRT_star.planner_VRRT_star_Bi_Informed import VRRT_star_Bi_Informed
 
 def calculate_path_smoothness(path):
     """

@@ -4,10 +4,10 @@ import random
 import math
 import time
 from mpl_toolkits.mplot3d import Axes3D
-from env_generator import env_generator
-from res_show import plot_map, plot_tree_and_path
+from env_generator_for_data import env_generator, env_generator_maze, env_generator_cluster
+from res_show import plot_map_and_waypoint, plot_tree_and_path
 
-# 定义 Node 类，用于表示树中的每个节点
+# 定义 Node 类
 class Node:
     def __init__(self, x, y, z):
         self.x = x              # 节点的 x 坐标
@@ -16,15 +16,15 @@ class Node:
         self.parent = None      # 节点的父节点，用于回溯路径
         self.cost = 0.0         # 从起点到该节点的路径成本
 
-# 定义 RRTStar 类，用于实现 RRT* 算法
-class RRTStar:
-    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, rand_area, expand_dis=25, max_iter=1500, search_radius=20.0, search_until_max_iter=False):
+class RRT_star:
+    def __init__(self, start, goal, R_crash, R_risk, obstacle_list, env_map, 
+                 expand_dis=25, max_iter=1500, search_radius=20.0, 
+                 search_until_max_iter=True):
         """
         初始化 RRT* 算法的参数
         :param start: 起点坐标 [x, y, z]
         :param goal: 目标坐标 [x, y, z]
         :param obstacle_list: 障碍物列表，每个障碍物为 [x, y, zmin, zmax, R_ob_crash, R_ob_risk]
-        :param rand_area: 随机采样区域的范围 [min, max]
         :param expand_dis: 树扩展的步长
         :param max_iter: 最大迭代次数
         :param search_radius: 搜索邻近节点的半径
@@ -33,9 +33,7 @@ class RRTStar:
         """
         self.start = Node(start[0], start[1], start[2])  # 创建起点节点
         self.goal = Node(goal[0], goal[1], goal[2])     # 创建目标节点
-        self.min_rand = rand_area[0]           # 随机采样区域的最小值
-        self.max_rand = rand_area[1]           # 随机采样区域的最大值
-        self.z_rand = rand_area[2]             # 随机采样区域的最大z值
+        self.env_map = env_map
         self.expand_dis = expand_dis           # 每次扩展的步长
         self.max_iter = max_iter               # 最大迭代次数
         self.obstacle_list = obstacle_list     # 存储障碍物列表
@@ -54,8 +52,12 @@ class RRTStar:
         self.goal.parent = None
         
         first_path_found = False
-        first_path = None
+        time_first = None
         iteration_find_path = 0
+        path_length_first = None
+        path_length_final = np.inf
+        first_path = None
+        final_path = None
 
         start_time = time.time()
         
@@ -93,6 +95,7 @@ class RRTStar:
                         first_path = self.generate_final_path_from_node(potential_goal_ind)
                         # 补充终点
                         first_path.append([self.goal.x, self.goal.y, self.goal.z])
+                        path_length_first = calculate_path_length(first_path)
                         
                         # 首次找到路径的迭代轮数与时间       
                         iteration_find_path = i
@@ -101,7 +104,7 @@ class RRTStar:
                         
                         # 可设：找到首次路径就停止
                         if not self.search_until_max_iter:
-                            return time_first, iteration_find_path, first_path, first_path
+                            return [first_path_found], [time_first], [iteration_find_path], [path_length_first], [path_length_first], first_path, first_path
         
         last_index = self.search_best_goal_node()
 
@@ -110,19 +113,24 @@ class RRTStar:
             final_best_path = self.generate_final_path_from_node(last_index)
             # 补充终点
             final_best_path.append([self.goal.x, self.goal.y, self.goal.z])
-            return time_first, iteration_find_path, first_path, final_best_path 
+            path_length_final = calculate_path_length(final_best_path)
+            
+            return [first_path_found], [time_first], [iteration_find_path], [path_length_first], [path_length_final], first_path, final_best_path
 
-        return None, None, None, None
+        return None, None, None, None, None, None, None
     
     def sample_free(self):
         """
         随机采样一个点
         :return: 随机点的坐标 [x, y, z]
         """
+        max_x_rand = self.env_map["map_dim"][0]
+        max_y_rand = self.env_map["map_dim"][1]
+        z_rand = self.env_map["map_dim"][2]
         rnd_gen = random.Random()
-        rnd = [rnd_gen.uniform(self.min_rand, self.max_rand),
-               rnd_gen.uniform(self.min_rand, self.max_rand),
-               rnd_gen.uniform(self.min_rand, self.z_rand)]
+        rnd = [rnd_gen.uniform(0, max_x_rand),
+               rnd_gen.uniform(0, max_y_rand),
+               rnd_gen.uniform(0, z_rand)]
         return rnd
     
     def sample_goal(self, goal_sample_rate):
@@ -165,7 +173,7 @@ class RRTStar:
         r = self.search_radius * math.sqrt(math.log(nnode) / nnode)  # 动态调整搜索半径
         # 限制最大、最小搜索半径
         r = min(r, self.search_radius)
-        r = max(r, 1.5 * self.expand_dis)
+        r = max(r, 2 * self.expand_dis)
         dlist = [(node.x - new_node.x) ** 2 + (node.y - new_node.y) ** 2 + (node.z - new_node.z) ** 2 for node in self.node_list]
         near_inds = [i for i in range(len(dlist)) if dlist[i] <= r ** 2]
         return near_inds
@@ -465,26 +473,30 @@ def calculate_path_length(path):
 if __name__ == '__main__':
     # 1. 生成地图
     print("正在生成地图...")
-    env_map = env_generator(
-        rho=0.4, 
-        map_size=1500,
-        z_size=240,
-        r_crash_range=(30, 50),
-        r_risk_range=(3, 7),
-        zmax_range=(30, 240),
-        max_iter=10000,
-        seed=40
-    )
+    # env_map = env_generator(
+    #     rho=0.4, 
+    #     map_dim=(1500, 1500, 240),
+    #     r_crash_range=(30, 50),
+    #     r_risk_range=(3, 7),
+    #     zmax_range=(30, 240),
+    #     max_iter=10000,
+    #     seed=40
+    # )
+    env_map = env_generator_cluster(
+        map_dim=(1500, 1500, 240), 
+        num_clusters=20,
+        chain_length_range=(1, 4), 
+        r_center_range=(100, 150),
+        r_edge_range=(20, 50), 
+        r_risk_range=(10, 20),
+        zmax_range=(240, 240), 
+        min_center_dist=200, 
+        seed=7)
     obstacle_list = env_map["obstacles"]
     print(f"地图生成完毕，包含 {len(obstacle_list)} 个障碍物。")
-    # plot_map(env_map)
     
-    # 2. 生成一定数量的起终点
-    num_of_tasks = 1
-    # print("正在生成", num_of_tasks, "对合法的起终点")
-    # tasks = generate_valid_tasks(num_of_tasks, env_map, seed=100)
-    # tasks = [([0, 0, 0], [5000, 5000, 100])]
     tasks = [([0, 0, 0], [1500, 1500, 100])]
+    # plot_map_and_waypoint(env_map, ([0, 0, 0], [1500, 1500, 240]))
 
     # 3. 运行测试
     success_times = []
@@ -498,7 +510,7 @@ if __name__ == '__main__':
     print("-" * 80)
     
     # 对每个起终点，进行num_pf_tests次规划
-    num_of_tests = 2
+    num_of_tests = 10
     for i, (start, goal) in enumerate(tasks):
         env_first_times = []
         env_final_times = []
@@ -508,22 +520,31 @@ if __name__ == '__main__':
         env_success_count = 0
         for j in range(num_of_tests):
             # 初始化 RRT*
-            rrt_star = RRTStar(
+            rrt_star = RRT_star(
                 start=start, 
                 goal=goal, 
                 R_crash=r_agent_crash, 
                 R_risk=r_agent_risk, 
                 obstacle_list=obstacle_list, 
-                rand_area=[0, env_map["size"], env_map["z_size"]],  
-                expand_dis=50,    # 步长
-                max_iter=10000,    # 迭代次数
-                search_radius=120.0
+                env_map=env_map,  
+                expand_dis=20,
+                max_iter=2000,
+                search_radius=100
             )
             start_time = time.time()
-            time_first, iteration_find_path, first_path, final_best_path = rrt_star.planning()
+            result = rrt_star.planning()
             end_time = time.time()
             
             time_final = end_time - start_time
+            
+            if result[0] is None:
+                time_first = result[1]
+                iteration_find_path = result[2]
+            else:
+                time_first = result[1][0]
+                iteration_find_path = result[2][0]
+            first_path = result[5]
+            final_best_path = result[6]
             
             if final_best_path:
                 plen_first = calculate_path_length(first_path)

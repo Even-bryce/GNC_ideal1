@@ -3,34 +3,29 @@ import os
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
-from multiprocessing import Pool, current_process
 from env_generator_for_data import env_generator, env_generator_maze, env_generator_cluster
 from res_show import plot_map_and_waypoint, plot_tree_and_path
-from planner_RRT_star import RRT_star
-from planner_RRT_star_Bi import RRT_star_Bi
-from planner_RRT_star_Bi_Bias import RRT_star_Bi_Bias
-from planner_RRT_star_Bi_APF import RRT_star_Bi_APF
-from planner_RRT_star_Bi_Bias_APF import RRT_star_Bias_APF_Bi
-from planner_RRT_star_Bi_Bias_APF_Informed import RRT_star_Bias_APF_Bi_Informed
-from planner_RRT_star_Bi_DBVS_APF import RRT_star_DBVSB_APF
+from planner_RRT_star.planner_RRT_star import RRT_star
+from planner_RRT_star.planner_RRT_star_Bi import RRT_star_Bi
+from planner_RRT_star.planner_RRT_star_Bi_Bias import RRT_star_Bi_Bias
+from planner_RRT_star.planner_RRT_star_Bi_APF import RRT_star_Bi_APF
+from planner_RRT_star.planner_RRT_star_Bi_Bias_APF import RRT_star_Bias_APF_Bi
+from planner_RRT_star.planner_RRT_star_Bi_Bias_APF_Informed import RRT_star_Bias_APF_Bi_Informed
+from planner_RRT_star.planner_RRT_star_Bi_DBVS_APF_Informed import RRT_star_DBVSB_APF_Informed
 
-from planner_VRRT_star import VRRT_star
-from planner_VRRT_star_APF import VRRT_star_APF
-from planner_VRRT_star_Bi import VRRT_star_Bi
-from planner_VRRT_star_Bi_APF import VRRT_star_Bi_APF
-from planner_VRRT_star_Bi_Bias import VRRT_star_Bi_Bias
-from planner_VRRT_star_Bi_Bias_APF import VRRT_star_Bi_Bias_APF
-from planner_VRRT_star_Bi_Bias_APF_Informed import VRRT_star_Bi_Bias_APF_Informed
-from planner_VRRT_star_Bi_Informed import VRRT_star_Bi_Informed
-from planner_VRRT_star_Bi_Informed_APF import VRRT_star_Bi_Informed_APF
+from planner_VRRT_star.planner_VRRT_star import VRRT_star
+from planner_VRRT_star.planner_VRRT_star_APF import VRRT_star_APF
+from planner_VRRT_star.planner_VRRT_star_Bi import VRRT_star_Bi
+from planner_VRRT_star.planner_VRRT_star_Bi_APF import VRRT_star_Bi_APF
+from planner_VRRT_star.planner_VRRT_star_Bi_Bias import VRRT_star_Bi_Bias
+from planner_VRRT_star.planner_VRRT_star_Bi_Bias_APF import VRRT_star_Bi_Bias_APF
+from planner_VRRT_star.planner_VRRT_star_Bi_Bias_APF_Informed import VRRT_star_Bi_Bias_APF_Informed
+from planner_VRRT_star.planner_VRRT_star_Bi_Informed import VRRT_star_Bi_Informed
+from planner_VRRT_star.planner_VRRT_star_Bi_Informed_APF import VRRT_star_Bi_Informed_APF
 
 def calculate_path_smoothness(path):
     """
-    计算由一系列坐标点组成的路径的平滑度。
-
-    参数:
-        path: list of list or array-like，每个元素为 [x, y, z] 坐标。
-              路径按顺序连接，即 path[0] -> path[1] -> path[2] -> ... 形成连续线段。
+    计算路径的平滑度
     """
     if len(path) < 3:
         return 0.0
@@ -74,9 +69,6 @@ def load_test_case(filename):
 def evaluate_step_length(args):
     step_length, max_iter, search_radius, env_map, waypoints, r_agent_crash, r_agent_risk, n_tests, planner_type = args
 
-    pid = current_process().pid
-    np.random.seed((int(step_length * 1000) + pid * 997) % 2**31)
-
     obstacles = env_map["obstacles"]
 
     # 收集每次测试的详细指标
@@ -94,6 +86,7 @@ def evaluate_step_length(args):
 
     for test_id in range(n_tests):
         print(test_id)
+        np.random.seed(int(step_length * 1000 + test_id * 7) % 2**31)
         # 根据规划器类型实例化
         if planner_type == 'RRT_star':
             rrt = RRT_star(env_map=env_map, 
@@ -139,8 +132,8 @@ def evaluate_step_length(args):
                             max_iter=max_iter, 
                             search_radius=search_radius, 
                             search_until_max_iter=True)
-        elif planner_type == 'RRT_star_Bi_DBVS_APF':
-            rrt = RRT_star_DBVSB_APF(env_map=env_map, 
+        elif planner_type == 'RRT_star_DBVSB_APF_Informed':
+            rrt = RRT_star_DBVSB_APF_Informed(env_map=env_map, 
                             start=waypoints[0], 
                             goal=waypoints[-1], 
                             R_crash=r_agent_crash, 
@@ -275,25 +268,18 @@ def evaluate_step_length(args):
         # 解包返回值
         (first_path_found, time_first, iteration_find_path,
          path_length_first, path_length_final, first_path, final_best_path) = result
-        # print(first_path_found)
-        # print(time_first)
-        # print(iteration_find_path)
-        # print(path_length_first)
-        # print(path_length_final)
+
         if not all(first_path_found):
             continue
 
         success_count += 1
 
-        # ---- 首次指标 ----
         max_t_first = max(time_first)                # 首次所需时间（所有航段中的最大值）
         sum_len_first = sum(path_length_first)       # 首次路径总长度
         smooth_first = calculate_path_smoothness(first_path)
 
-        # ---- 迭代轮数（首次）----
         sum_iter = sum(iteration_find_path)
 
-        # ---- 最终指标 ----
         total_time = t_end - t_start
         sum_len_final = sum(path_length_final)       # 最终路径总长度
         smooth_final = calculate_path_smoothness(final_best_path)  # final_best_path已合并
@@ -312,29 +298,6 @@ def evaluate_step_length(args):
             return None, None
         arr = np.array(lst)
         return np.mean(arr), np.std(arr)
-    
-    # def mean_std(lst, lower=5, upper=95):
-    #     if len(lst) == 0:
-    #         return None, None
-    #     arr = np.array(lst)
-    #     mean_all = np.mean(arr)
-
-    #     # 计算裁剪后的标准差
-    #     arr_sorted = np.sort(arr)
-    #     n = len(arr_sorted)
-    #     low_idx = int(np.floor(n * lower / 100.0))
-    #     high_idx = int(np.ceil(n * upper / 100.0))
-    #     low_idx = max(0, low_idx)
-    #     high_idx = min(n, high_idx)
-
-    #     if low_idx >= high_idx or high_idx - low_idx < 2:
-    #         # 裁剪后数据太少，退回使用全部数据的标准差
-    #         std_trimmed = np.std(arr)
-    #     else:
-    #         trimmed = arr_sorted[low_idx:high_idx]
-    #         std_trimmed = np.std(trimmed)
-
-    #     return mean_all, std_trimmed
 
     stats = {}
     for key in records:
@@ -347,66 +310,40 @@ def evaluate_step_length(args):
 
 if __name__ == '__main__':
     # map_type = 'homogeneous'
-    map_type = 'cluster'
-    # map_type = 'maze'
-
-    # # 地图生成
-    # if map_type == 'homogeneous':
-    #     env_map = env_generator(
-    #     rho=0.3,
-    #     map_dim=(1500, 1500, 240),
-    #     r_crash_range=(30, 50),
-    #     r_risk_range=(3, 7),
-    #     zmax_range=(30, 240),
-    #     max_iter=10000,
-    #     seed=2)
-    # elif map_type == 'cluster':
-    #     env_map = env_generator_cluster(map_dim=(1500, 1500, 240), 
-    #                                     num_clusters=20,
-    #                                     chain_length_range=(1, 4), 
-    #                                     r_center_range=(100, 150),
-    #                                     r_edge_range=(20, 50), 
-    #                                     r_risk_range=(10, 20),
-    #                                     zmax_range=(240, 240), 
-    #                                     min_center_dist=200, 
-    #                                     seed=7)
-    # elif map_type == 'maze':
-    #     env_map = env_generator_maze(grid_size=(4, 4), 
-    #                                  map_dim=(1500, 1500, 240),
-    #                                  r_crash_range=(40, 60), 
-    #                                  r_risk_range=(10, 20),
-    #                                  zmax_range=(240, 240), 
-    #                                  seed=42)
-    # else:
-    #     raise ValueError(f"未知的地图类型: {map_type}")
-
-    # waypoints = [[0, 0, 0], [267, 270, 14], [450, 542, 27], [838, 833, 84], [1177, 1162, 53], [1500, 1500, 100]]
+    # map_type = 'cluster'
+    map_type = 'maze'
     
-    # env_map, waypoints = load_test_case('test_case_cluster.pkl')
-    env_map, waypoints = load_test_case('test_case_clutter.pkl')
-    # env_map, waypoints = load_test_case('test_case_maze.pkl')
-    # waypoints = [[427,61,122], [1319, 1387, 17]]
+    # 地图生成
+    if map_type == 'homogeneous':
+        env_map, waypoints = load_test_case('test_case_clutter.pkl') 
+    elif map_type == 'cluster':
+        env_map, waypoints = load_test_case('test_case_cluster.pkl')
+    elif map_type == 'maze':
+        env_map, waypoints = load_test_case('test_case_maze.pkl')
+    else:
+        raise ValueError(f"未知的地图类型: {map_type}")
+    
     r_agent_crash = 1.2
     r_agent_risk = 1.7
-    num_of_tests = 50
+    num_of_tests = 5
     step = 15
     max_iter = 2000
     search_radius = 50
     plot_map_and_waypoint(env_map, waypoints)
-    # planner_type_list = ['VRRT_star', 'VRRT_star_Bi', 'VRRT_star_Bi_APF', 'VRRT_star_Bi_Bias', 'VRRT_star_Bi_Bias_APF', 'VRRT_star_Bi_Bias_APF_Informed']
-    # planner_type_list = ['RRT_star_Bi', 'RRT_star_Bi_APF', 'RRT_star_Bi_Bias', 'RRT_star_Bi_Bias_APF', 'RRT_star_Bi_Bias_APF_Informed', 'RRT_star_Bi_DBVS_APF']
-    # planner_type_list = ['RRT_star_Bi', 'RRT_star_Bi_DBVS_APF', 'RRT_star_Bi_Bias_APF_Informed', 'VRRT_star_Bi', 'VRRT_star_Bi_Bias_APF', 'VRRT_star_Bi_Bias_APF_Informed']
-    planner_type_list = ['VRRT_star_Bi']
+    
+    planner_type_list = ['VRRT_star_Bi_APF']
+    
     print(f"规划器类型: {planner_type_list}")
     print(f"地图类型: {map_type}")
     print(f"测试步长: {step}")
     print(f"每个步长重复规划 {num_of_tests} 次")
 
-    tasks = [(step, max_iter, search_radius, env_map, waypoints, r_agent_crash, r_agent_risk, num_of_tests, planner_type)
-             for planner_type in planner_type_list]
-
-    with Pool(processes=len(planner_type_list)) as pool:
-        results = pool.map(evaluate_step_length, tasks)
+    results = []
+    for planner_type in planner_type_list:
+        args = (step, max_iter, search_radius, env_map, waypoints, 
+                r_agent_crash, r_agent_risk, num_of_tests, planner_type)
+        res = evaluate_step_length(args)
+        results.append(res)
 
     # 解析结果
     planners, success_rates = [], []

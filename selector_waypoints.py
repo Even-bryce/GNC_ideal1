@@ -4,9 +4,9 @@ import time
 from env_generator_for_data import env_generator, env_generator_maze, env_generator_cluster
 from res_show import plot_tree_and_path
 
-from planner_VRRT import VRRT
-from planner_VRRT_star import VRRT_star
-from planner_VRRT_star_APF import VRRT_star_APF
+from planner_VRRT_star.planner_VRRT import VRRT
+from planner_VRRT_star.planner_VRRT_star import VRRT_star
+from planner_VRRT_star.planner_VRRT_star_APF import VRRT_star_APF
 
 def find_straight_waypoint(ori_path, env_map=None, epsilon=20.0, check_step=0.5, safety_margin=1.2, min_dist_ratio=0.1):
     """
